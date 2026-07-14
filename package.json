@@ -1,6 +1,6 @@
 {
-  "name": "blazephoenix-sdk",
-  "version": "0.1.0",
+  "name": "@blazephoenix/sdk",
+  "version": "0.2.0",
   "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, execute and index swaps on Base, Ethereum, Optimism and Arbitrum. No API key required.",
   "keywords": [
     "blazephoenix",
@@ -18,7 +18,10 @@
     "viem"
   ],
   "license": "MIT",
-  "repository": "github:blazephoenixxyz-crypto/SDK",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blazephoenixxyz-crypto/SDK.git"
+  },
   "homepage": "https://blazephoenix.xyz/?tab=api",
   "bugs": "https://github.com/blazephoenixxyz-crypto/SDK/issues",
   "type": "module",
@@ -45,8 +48,8 @@
     "build": "tsup",
     "test": "tsx scripts/test.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run build && npm test",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
   },
   "peerDependencies": {
     "viem": ">=2.0.0"
@@ -65,8 +68,5 @@
   },
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "@blazephoenix/sdk": "github:blazephoenixxyz-crypto/SDK"
   }
 }

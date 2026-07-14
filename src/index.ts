@@ -11,6 +11,10 @@ export {
 } from './constants.js';
 export { QUOTER_ABI, ROUTER_ABI } from './abis.js';
 export {
+  buildApproveTx, toBaseUnits, fromBaseUnits, MAX_UINT256,
+  type ApproveOptions,
+} from './erc20.js';
+export {
   quoteOnChain, watchFills, getFills,
   type OnChainOptions, type WatchFillsOptions,
 } from './onchain.js';

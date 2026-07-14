@@ -10,30 +10,33 @@ Every number the API serves is computed **on-chain** by the Quoter contract
 > Live docs & playground: **https://blazephoenix.xyz/?tab=api**
 
 ```bash
-npm i @blazephoenix/sdk
+npm i github:blazephoenixxyz-crypto/SDK   # builds on install — no registry needed
+# (or, once published to npm:)  npm i @blazephoenix/sdk
 # optional (only for the on-chain module: quoteOnChain / watchFills / getFills):
 npm i viem
 ```
 
-## Quote → sign → send
+## Quote → approve → send (the whole loop)
 
 ```ts
-import { BlazePhoenix, buildSwapTx } from '@blazephoenix/sdk';
+import { BlazePhoenix, buildSwapTx, buildApproveTx, toBaseUnits } from '@blazephoenix/sdk';
 
 const blaze = new BlazePhoenix();
+const amountIn = toBaseUnits('1.5', 18);   // "1.5" WETH → 1500000000000000000n
 
 const q = await blaze.quote({
   chain: 'base',                 // 8453 | 'base' | 1 | 'eth' | 10 | 42161 …
   tokenIn: 'WETH',               // 0x-address or ETH / WETH / USDC / BZPX
   tokenOut: 'USDC',
-  amountIn: 10n ** 18n,          // base units
+  amountIn,
   recipient: '0xYOU',            // ← makes the API return ready-to-send calldata
   slippageBps: 50,
 });
 
-// 1) approve the Router for tokenIn (once per token), then:
-const tx = buildSwapTx(q);       // { to, data, value }
-await wallet.sendTransaction(tx);
+// once per token: allow the Router to pull tokenIn (exact amount — or MAX_UINT256)
+await wallet.sendTransaction(buildApproveTx({ chain: 'base', token: q.tokenIn, amount: amountIn }));
+// then execute exactly what was quoted:
+await wallet.sendTransaction(buildSwapTx(q));   // { to, data, value }
 ```
 
 ## Batch quotes (screeners / arb loops)
