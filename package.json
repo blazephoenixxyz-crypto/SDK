@@ -1,0 +1,43 @@
+{
+  "name": "@blazephoenix/sdk",
+  "version": "0.1.0",
+  "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, execute and index swaps on Base, Ethereum, Optimism and Arbitrum. No API key required.",
+  "keywords": [
+    "blazephoenix", "bzpx", "dex", "dex-aggregator", "swap", "defi",
+    "base", "ethereum", "optimism", "arbitrum", "quote-api", "telegram-bot", "viem"
+  ],
+  "license": "MIT",
+  "repository": "github:blazephoenixxyz-crypto/SDK",
+  "homepage": "https://blazephoenix.xyz/?tab=api",
+  "bugs": "https://github.com/blazephoenixxyz-crypto/SDK/issues",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsup",
+    "test": "tsx scripts/test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+  },
+  "peerDependencies": { "viem": ">=2.0.0" },
+  "peerDependenciesMeta": { "viem": { "optional": true } },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "viem": "^2.19.0"
+  },
+  "publishConfig": { "access": "public" }
+}
