@@ -9,7 +9,11 @@ export type Hex = `0x${string}`;
 /** Chain selector: id (1, 8453, 10, 42161) or name ("base", "eth", …). */
 export type ChainRef = number | string;
 
-/** Token selector: 0x-address, or ETH / WETH / USDC / BZPX. */
+/** Token selector: 0x-address, ETH / WETH / USDC / BZPX, or (single-quote
+ *  endpoint only) ANY traded symbol — the API resolves unknown tickers to the
+ *  deepest-liquidity token on that chain and echoes the resolution back in
+ *  `resolved`. Pass 0x addresses when you need precision; the batch endpoint
+ *  takes addresses/built-in symbols only. */
 export type TokenRef = string;
 
 export interface QuoteRequest {
@@ -96,6 +100,11 @@ export interface QuoteResponse {
   tx?: QuoteTx;                  // present when `recipient` was sent
   wrapRequired: boolean;         // in=ETH → wrap to WETH first
   unwrapAfter?: boolean;         // out=ETH → Router delivers WETH
+  /** Present when a symbol was resolved server-side: per side
+   *  { symbol, address, name?, liquidityUsd }. Always check it when quoting
+   *  by ticker — it tells you exactly which token you got. */
+  resolved?: Record<string, { symbol: string; address: Address; name?: string; liquidityUsd: number }>;
+  resolvedNote?: string;
   executeWith?: { router: Address; function: string; note: string };
   meta: { quotedAt: number; latencyMs: number; rpcTried: number };
 }

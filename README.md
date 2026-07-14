@@ -26,7 +26,9 @@ const amountIn = toBaseUnits('1.5', 18);   // "1.5" WETH → 1500000000000000000
 
 const q = await blaze.quote({
   chain: 'base',                 // 8453 | 'base' | 1 | 'eth' | 10 | 42161 …
-  tokenIn: 'WETH',               // 0x-address or ETH / WETH / USDC / BZPX
+  tokenIn: 'WETH',               // 0x-address, ETH/WETH/USDC/BZPX — or ANY traded
+                                 //   symbol ('TOSHI', 'DEGEN'…): resolved to the
+                                 //   deepest-liquidity token, echoed in q.resolved
   tokenOut: 'USDC',
   amountIn,
   recipient: '0xYOU',            // ← makes the API return ready-to-send calldata

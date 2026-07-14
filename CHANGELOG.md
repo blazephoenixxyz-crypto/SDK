@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-07-14
+
+- The single-quote endpoint now accepts **any traded token symbol** (`in=TOSHI`)
+  — the API resolves unknown tickers to the deepest-liquidity token on the
+  target chain and echoes the resolution back in `QuoteResponse.resolved`.
+  No SDK code change needed (strings pass through); types + docs updated:
+  `resolved` / `resolvedNote` fields, `TokenRef` semantics. Batch endpoint
+  remains addresses/built-in symbols only (by design).
+
 ## 0.2.0 — 2026-07-14
 
 - **`buildApproveTx({ token, chain, amount, spender? })`** — ready-to-send
