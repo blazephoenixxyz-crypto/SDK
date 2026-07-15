@@ -86,6 +86,38 @@ the input for the **quoted-vs-executed verification pattern** documented on the
 API page: re-run each fill's quote at its block and compare with the executed
 amount the event recorded. Verify us, don't trust us.
 
+## Resilient by default (v0.3.0)
+
+Every call ships the same meta-patterns the BlazePhoenix edge runs — no config:
+
+- identical concurrent calls **coalesce into one request** (singleflight)
+- preview quotes ride a **1s micro-cache** (`cacheTtlMs`; never applied to
+  `recipient`/`exact` requests — execution data stays fresh, always)
+- transient failures (network, 429, 502–504) **retry with backoff** and honour
+  the server's `retry-after` (`retries`, default 2)
+
+```ts
+// a price loop in one line — overlap-safe, stop() when done:
+import { pollQuote } from '@blazephoenix/sdk';
+const stop = pollQuote(blaze,
+  { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n },
+  (q) => console.log('WETH→USDC', q.amountOut),
+  { intervalMs: 4000 });
+```
+
+## 🔥 Phoenix Bot — zero-custody Telegram bot
+
+[`examples/phoenix-bot.ts`](examples/phoenix-bot.ts) is a complete Telegram bot
+with a difference: **it never holds a key**. It quotes on-chain truth, streams
+real fills (`/watch`), and executes by deep-linking users into their OWN wallet.
+The famous trading bots custody your funds; this one can't lose what it never
+touches.
+
+```bash
+npm i grammy viem
+BOT_TOKEN=... RPC_URL=https://your-base-rpc npx tsx examples/phoenix-bot.ts
+```
+
 ## Errors
 
 HTTP-level failures throw `BlazeApiError` with a stable `code`:

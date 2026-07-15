@@ -2,9 +2,10 @@
 // Docs & live playground: https://blazephoenix.xyz/?tab=api
 
 export {
-  BlazePhoenix, BlazeApiError, buildSwapTx, deepLink,
-  type ClientOptions, type DeepLinkOptions,
+  BlazePhoenix, BlazeApiError, buildSwapTx, deepLink, pollQuote,
+  type ClientOptions, type DeepLinkOptions, type PollOptions,
 } from './client.js';
+export { resilientFetch, singleflight, type RetryOptions } from './resilience.js';
 export {
   API_BASE, CHAINS, FEE_BPS, SWAP_TOPIC0, SURPLUS_TOPIC0, resolveChain,
   type ChainInfo, type SupportedChainId,

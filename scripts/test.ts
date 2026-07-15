@@ -110,6 +110,75 @@ check('buildSwapTx explains native input',
   eq('fromBaseUnits: maxDp truncates', fromBaseUnits(1_234_567n, 6, 2), '1.23');
 }
 
+// ── resilience core: retry, singleflight, micro-cache, pollQuote ────────────
+{
+  const { resilientFetch, singleflight, memGet, memPut, __resetResilience } =
+    await import('../src/resilience.js');
+  const { BlazePhoenix, pollQuote } = await import('../src/client.js');
+
+  __resetResilience();
+
+  // retry: one transient failure then success → 2 calls, final ok.
+  let n = 0;
+  const flaky = (async () => {
+    n++;
+    return n === 1
+      ? new Response('busy', { status: 502, headers: { 'retry-after': '0' } })
+      : new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  const res = await resilientFetch(flaky, 'https://x.test/q', undefined, { retries: 2, backoffMs: 1 });
+  check('resilience: transient 502 retried to success', res.status === 200 && n === 2);
+
+  // non-transient statuses are NOT retried.
+  n = 0;
+  const bad = (async () => { n++; return new Response('no', { status: 400 }); }) as unknown as typeof fetch;
+  const res2 = await resilientFetch(bad, 'https://x.test/q', undefined, { retries: 3, backoffMs: 1 });
+  check('resilience: 400 not retried', res2.status === 400 && n === 1);
+
+  // singleflight
+  let calls = 0;
+  const slow = () => new Promise<number>((r) => { calls++; setTimeout(() => r(7), 20); });
+  const [a, b] = await Promise.all([singleflight('sf', slow), singleflight('sf', slow)]);
+  check('resilience: singleflight shares one execution', a === 7 && b === 7 && calls === 1);
+
+  // micro-cache
+  memPut('k', { v: 1 });
+  check('resilience: memGet within ttl', (memGet('k', 60_000) as { v: number }).v === 1);
+  check('resilience: memGet ttl 0 disabled', memGet('k', 0) === undefined);
+
+  // client quote micro-cache: two sequential quotes → one fetch.
+  __resetResilience();
+  let qc = 0;
+  const quoteFetch = (async () => {
+    qc++;
+    return new Response(JSON.stringify({ ok: true, amountOut: '123', mode: 'preview' }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  const c2 = new BlazePhoenix({ fetchFn: quoteFetch, cacheTtlMs: 5_000, retries: 0 });
+  const req = { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: '1' } as const;
+  await c2.quote(req);
+  const again = await c2.quote(req);
+  check('client: preview micro-cache absorbs hot loop', qc === 1 && again.amountOut === '123');
+  await c2.quote({ ...req, recipient: '0x0000000000000000000000000000000000000001' });
+  check('client: recipient (execution) bypasses the cache', qc === 2);
+
+  // pollQuote: ticks and stops cleanly.
+  __resetResilience();
+  let ticks = 0;
+  const stop = pollQuote(
+    new BlazePhoenix({ fetchFn: quoteFetch, cacheTtlMs: 0, retries: 0 }),
+    req, () => { ticks++; }, { intervalMs: 500 },
+  );
+  await new Promise((r) => setTimeout(r, 80));
+  stop();
+  const seen = ticks;
+  await new Promise((r) => setTimeout(r, 60));
+  check('pollQuote: immediate tick fired', seen >= 1);
+  check('pollQuote: stop() halts the loop', ticks === seen);
+  __resetResilience();
+}
+
 // ── error type ───────────────────────────────────────────────────────────────
 const err = new BlazeApiError('no_route', 'no executable route', 422);
 check('BlazeApiError shape', err.code === 'no_route' && err.status === 422 && err instanceof Error);

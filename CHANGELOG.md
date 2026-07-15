@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — 2026-07-15
+
+- **Resilience core, on by default** — every client call now ships the same
+  meta-patterns the BlazePhoenix edge runs: identical concurrent calls share
+  ONE request (singleflight), preview quotes ride a 1s micro-cache (never
+  recipient/exact — the execution red line), transient failures (network,
+  429, 502–504) retry with jittered backoff honouring the server's
+  `retry-after`. Tune via `retries` / `cacheTtlMs`; `manifest()` caches 1h.
+- **`pollQuote(client, req, onQuote, { intervalMs })`** — the heartbeat of a
+  price bot in one line; overlap-safe, returns a stop function.
+- **`examples/phoenix-bot.ts`** — a full Telegram bot with ZERO custody:
+  quotes on-chain truth, streams real fills, and executes via deep links in
+  the USER's own wallet. No private keys, ever.
+- Exposed `resilientFetch` / `singleflight` for power users.
+
 ## 0.2.1 — 2026-07-14
 
 - The single-quote endpoint now accepts **any traded token symbol** (`in=TOSHI`)
