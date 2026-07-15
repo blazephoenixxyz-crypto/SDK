@@ -4,7 +4,7 @@ import { watchFills } from '@blazephoenix/sdk';
 
 const unwatch = await watchFills({
   chain: 'base',
-  rpcUrl: process.env.RPC_URL!, // bring your own node — the SDK ships no keys
+  rpcUrl: process.env.RPC_URL, // optional since v0.4.0 — public endpoints by default
   onFill: (f) => {
     console.log(
       `${f.txHash} — ${f.user} swapped ${f.amountIn} (${f.tokenIn}) → ${f.amountOut} (${f.tokenOut}) via ${f.legs} legs`,

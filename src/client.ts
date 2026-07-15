@@ -7,7 +7,7 @@
 import { API_BASE, resolveChain } from './constants.js';
 import { memGet, memPut, resilientFetch, singleflight } from './resilience.js';
 import type {
-  BatchResponse, ManifestResponse, QuoteRequest, QuoteResponse, QuoteTx,
+  BatchResponse, HealthResponse, ManifestResponse, QuoteRequest, QuoteResponse, QuoteTx,
 } from './types.js';
 
 export class BlazeApiError extends Error {
@@ -117,6 +117,12 @@ export class BlazePhoenix {
         headers: { 'content-type': 'application/json' },
         body,
       }));
+  }
+
+  /** Service health + per-chain live flags. Zero upstream cost server-side —
+   *  poll it from your monitor as often as you like. */
+  health(): Promise<HealthResponse> {
+    return this.call<HealthResponse>('/api/health');
   }
 
   /** Machine-readable protocol manifest — near-static, cached for 1h. */

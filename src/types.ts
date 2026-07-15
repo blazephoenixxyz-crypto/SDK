@@ -149,6 +149,14 @@ export interface ManifestResponse {
   contact: string;
 }
 
+export interface HealthResponse {
+  ok: true;
+  service: string;
+  version: string;
+  now: number;
+  chains: { chainId: number; name: string; live: boolean }[];
+}
+
 /** A decoded on-chain fill (Router `Swap` event). */
 export interface Fill {
   txHash: Hex;

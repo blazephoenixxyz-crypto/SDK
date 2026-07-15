@@ -62,8 +62,10 @@ deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'BZPX', amount: '0.5' });
 
 ## On-chain module (optional `viem` peer)
 
-Zero middlemen — same numbers, straight from your own node. **The SDK ships no
-RPC endpoints and no keys by design**: you bring your own `rpcUrl`.
+Zero middlemen — same numbers, straight from the chain. **RPC optional since
+v0.4.0**: omit `rpcUrl` and the SDK falls back across public keyless endpoints
+(bring your own node for production throughput). Still zero providers and zero
+keys shipped — enforced by tests.
 
 ```ts
 import { quoteOnChain, watchFills, getFills } from '@blazephoenix/sdk';

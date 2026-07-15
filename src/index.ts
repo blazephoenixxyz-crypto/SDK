@@ -7,7 +7,7 @@ export {
 } from './client.js';
 export { resilientFetch, singleflight, type RetryOptions } from './resilience.js';
 export {
-  API_BASE, CHAINS, FEE_BPS, SWAP_TOPIC0, SURPLUS_TOPIC0, resolveChain,
+  API_BASE, CHAINS, PUBLIC_RPCS, FEE_BPS, SWAP_TOPIC0, SURPLUS_TOPIC0, resolveChain,
   type ChainInfo, type SupportedChainId,
 } from './constants.js';
 export { QUOTER_ABI, ROUTER_ABI } from './abis.js';
