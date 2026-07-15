@@ -179,6 +179,25 @@ check('buildSwapTx explains native input',
   __resetResilience();
 }
 
+// ── v0.4.0: public keyless RPCs + health() ──────────────────────────────────
+{
+  const { PUBLIC_RPCS } = await import('../src/constants.js');
+  const all = Object.values(PUBLIC_RPCS).flat().join(' ').toLowerCase();
+  check('public RPCs: every chain covered',
+    ([1, 8453, 10, 42161] as const).every((id) => PUBLIC_RPCS[id].length >= 2));
+  check('public RPCs: strictly keyless (no providers, no keys)',
+    !/alchemy|drpc|infura|\/v2\/|apikey|api_key/.test(all));
+  check('public RPCs: https only', Object.values(PUBLIC_RPCS).flat().every((u) => u.startsWith('https://')));
+
+  const { BlazePhoenix } = await import('../src/client.js');
+  const healthFetch = (async () =>
+    new Response(JSON.stringify({ ok: true, service: 'blazephoenix-api', version: '1.0.0', now: 1, chains: [] }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch;
+  const h = await new BlazePhoenix({ fetchFn: healthFetch, retries: 0 }).health();
+  check('client.health(): typed response', h.ok && h.service === 'blazephoenix-api');
+}
+
 // ── error type ───────────────────────────────────────────────────────────────
 const err = new BlazeApiError('no_route', 'no executable route', 422);
 check('BlazeApiError shape', err.code === 'no_route' && err.status === 422 && err instanceof Error);

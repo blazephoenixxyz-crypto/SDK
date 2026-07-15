@@ -6,7 +6,7 @@
 // =============================================================================
 
 import { QUOTER_ABI, ROUTER_ABI } from './abis.js';
-import { CHAINS, resolveChain } from './constants.js';
+import { CHAINS, PUBLIC_RPCS, resolveChain, type SupportedChainId } from './constants.js';
 import type { Address, Fill } from './types.js';
 
 async function loadViem() {
@@ -19,17 +19,25 @@ async function loadViem() {
 
 export interface OnChainOptions {
   chain: number | string;
-  /** Your RPC endpoint for that chain (the SDK ships none by design). */
-  rpcUrl: string;
+  /** Your RPC endpoint. OPTIONAL since v0.4.0 — omitted, the SDK falls back
+   *  across public keyless endpoints (fine for dev/bots; bring your own node
+   *  for production throughput). The SDK still ships no providers and no keys. */
+  rpcUrl?: string;
+}
+
+/** viem transport: caller's RPC when given, else public-endpoint fallback. */
+async function transportFor(chainId: SupportedChainId, rpcUrl?: string) {
+  const { http, fallback } = await loadViem();
+  return rpcUrl ? http(rpcUrl) : fallback(PUBLIC_RPCS[chainId].map((u) => http(u)));
 }
 
 /** previewPlan straight from the chain — the exact numbers the API serves. */
 export async function quoteOnChain(
   opts: OnChainOptions & { tokenIn: Address; tokenOut: Address; amountIn: bigint },
 ) {
-  const { createPublicClient, http } = await loadViem();
+  const { createPublicClient } = await loadViem();
   const chainId = resolveChain(opts.chain);
-  const client = createPublicClient({ transport: http(opts.rpcUrl) });
+  const client = createPublicClient({ transport: await transportFor(chainId, opts.rpcUrl) });
   const [pv, , hasFallback] = (await client.readContract({
     address: CHAINS[chainId].contracts.quoter,
     abi: QUOTER_ABI,
@@ -48,9 +56,9 @@ export interface WatchFillsOptions extends OnChainOptions {
 /** Stream every BlazePhoenix fill on a chain (one Router `Swap` event per
  *  swap). Returns an unwatch function. */
 export async function watchFills(opts: WatchFillsOptions): Promise<() => void> {
-  const { createPublicClient, http, parseAbiItem } = await loadViem();
+  const { createPublicClient, parseAbiItem } = await loadViem();
   const chainId = resolveChain(opts.chain);
-  const client = createPublicClient({ transport: http(opts.rpcUrl) });
+  const client = createPublicClient({ transport: await transportFor(chainId, opts.rpcUrl) });
   return client.watchEvent({
     address: CHAINS[chainId].contracts.router,
     event: parseAbiItem(
@@ -79,9 +87,9 @@ export async function watchFills(opts: WatchFillsOptions): Promise<() => void> {
 export async function getFills(
   opts: OnChainOptions & { fromBlock: bigint; toBlock: bigint },
 ): Promise<Fill[]> {
-  const { createPublicClient, http, parseAbiItem } = await loadViem();
+  const { createPublicClient, parseAbiItem } = await loadViem();
   const chainId = resolveChain(opts.chain);
-  const client = createPublicClient({ transport: http(opts.rpcUrl) });
+  const client = createPublicClient({ transport: await transportFor(chainId, opts.rpcUrl) });
   const logs = await client.getLogs({
     address: CHAINS[chainId].contracts.router,
     event: parseAbiItem(

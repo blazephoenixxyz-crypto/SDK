@@ -86,11 +86,11 @@ bot.command('quote', async (ctx) => {
 const watchers = new Map<number, () => void>();
 
 bot.command('watch', async (ctx) => {
-  if (!process.env.RPC_URL) return ctx.reply('set RPC_URL to enable fill streaming');
+  
   if (watchers.has(ctx.chat.id)) return ctx.reply('already watching — /stop to end');
   const unwatch = await watchFills({
     chain: CHAIN,
-    rpcUrl: process.env.RPC_URL,
+    rpcUrl: process.env.RPC_URL, // optional — public endpoints when unset
     onFill: (f) => {
       void ctx.reply(
         `🟦 fill: ${fmt(f.amountIn.toString(), 4)} → ${fmt(f.amountOut.toString(), 4)}`

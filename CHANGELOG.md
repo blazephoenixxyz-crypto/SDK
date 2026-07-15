@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 — 2026-07-15
+
+- **RPC is now optional everywhere.** `quoteOnChain` / `watchFills` / `getFills`
+  work with ZERO configuration: when `rpcUrl` is omitted the SDK falls back
+  across public keyless endpoints (`PUBLIC_RPCS`, exported). Bring your own
+  node for production throughput. Still no providers and no keys shipped —
+  enforced by tests (keyless + https-only).
+- **`client.health()`** — service health + per-chain live flags, backed by the
+  new `GET /api/health` (zero upstream cost server-side: poll freely).
+- The API is now self-discovering: `GET /api` describes every endpoint, and
+  each quote response carries `units` + `links` — a consumer that sees one
+  response can bootstrap the whole integration.
+
 ## 0.3.0 — 2026-07-15
 
 - **Resilience core, on by default** — every client call now ships the same

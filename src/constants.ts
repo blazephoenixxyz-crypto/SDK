@@ -96,6 +96,33 @@ export function resolveChain(chain: number | string): SupportedChainId {
   return id;
 }
 
+/** Public, KEYLESS RPC endpoints per chain — community infrastructure, no
+ *  providers, no keys (enforced by tests). They make the on-chain module work
+ *  with ZERO configuration; production integrations should still bring their
+ *  own `rpcUrl` for guaranteed throughput. */
+export const PUBLIC_RPCS: Record<SupportedChainId, string[]> = {
+  1: [
+    'https://ethereum-rpc.publicnode.com',
+    'https://cloudflare-eth.com',
+    'https://1rpc.io/eth',
+  ],
+  8453: [
+    'https://mainnet.base.org',
+    'https://base-rpc.publicnode.com',
+    'https://1rpc.io/base',
+  ],
+  10: [
+    'https://optimism-rpc.publicnode.com',
+    'https://mainnet.optimism.io',
+    'https://1rpc.io/op',
+  ],
+  42161: [
+    'https://arbitrum-one-rpc.publicnode.com',
+    'https://arb1.arbitrum.io/rpc',
+    'https://1rpc.io/arb',
+  ],
+};
+
 /** Protocol fee (bps) applied to quoted output; execution surplus is fee-exempt. */
 export const FEE_BPS = 28;
 
