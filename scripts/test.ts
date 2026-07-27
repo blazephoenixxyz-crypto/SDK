@@ -32,8 +32,14 @@ eq('8453 number → 8453', resolveChain(8453), 8453);
 eq('eth alias → 1', resolveChain('ETH'), 1);
 eq('arbitrum-one alias', resolveChain('arbitrum-one'), 42161);
 check('unknown chain throws', (() => { try { resolveChain('solana'); return false; } catch { return true; } })());
-check('all four chains configured',
-  ([1, 8453, 10, 42161] as const).every((id) => CHAINS[id].contracts.quoter.startsWith('0x')));
+check('all five chains configured',
+  ([1, 8453, 10, 42161, 4663] as const).every((id) => CHAINS[id].contracts.quoter.startsWith('0x')));
+eq('robinhood alias', resolveChain('robinhood'), 4663);
+eq('robinhood numeric alias', resolveChain('4663'), 4663);
+eq('rh short alias', resolveChain('rh'), 4663);
+// Robinhood's dollar asset is USDG, not USDC — the field carries the chain's
+// canonical dollar token, and getting this wrong would misprice every quote.
+eq('robinhood dollar asset is USDG', CHAINS[4663].usdc, '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
 // The SDK must never ship provider endpoints or keys — only public explorers
 // and contract addresses. (Integrators bring their own rpcUrl.)
 {
@@ -57,6 +63,23 @@ const url2 = c.quoteUrl({
 check('quote URL carries optional params',
   url2.includes('recipient=0x0000000000000000000000000000000000000001')
   && url2.includes('slippageBps=50') && url2.includes('exact=1') && url2.includes('chain=1'));
+
+// ── bring-your-own RPC ───────────────────────────────────────────────────────
+// The parameter must reach the wire when set, and be ABSENT when not: a bot
+// that never configured a node must not have an empty rpc= appended to it.
+check('rpc param reaches the query when supplied',
+  c.quoteUrl({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n, rpc: 'https://node.example.com/x' })
+    .includes('rpc=https%3A%2F%2Fnode.example.com%2Fx'));
+check('rpc param absent when not supplied',
+  !c.quoteUrl({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }).includes('rpc='));
+check('client-wide rpc default applies to every request',
+  new BlazePhoenix({ rpc: 'https://mine.example.com/k' })
+    .quoteUrl({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n })
+    .includes('rpc=https%3A%2F%2Fmine.example.com%2Fk'));
+check('a per-request rpc overrides the client default',
+  new BlazePhoenix({ rpc: 'https://mine.example.com/k' })
+    .quoteUrl({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n, rpc: 'https://other.example.com/z' })
+    .includes('other.example.com'));
 
 // ── deep links ───────────────────────────────────────────────────────────────
 eq('deep link default tab',
