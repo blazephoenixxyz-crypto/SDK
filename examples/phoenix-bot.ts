@@ -111,6 +111,29 @@ const swapBtn = (tokenIn: string, tokenOut: string, amount?: string) => {
 };
 
 
+
+// ── SECURITY: escaping untrusted text before it enters an HTML message ──────
+// The replies use parse_mode HTML, and two kinds of text reach them that we do
+// not control: what a user typed after a command, and what an indexer returned
+// (symbols, dex names — ultimately written by whoever deployed the token).
+//
+// Without escaping, anyone in a group could send
+//   /scan <a href="https://evil.example">Claim your airdrop</a>
+// and the bot would render a clickable phishing link INSIDE a message wearing
+// our name and logo. That is worse than an ordinary scam post, because the
+// brand is doing the vouching. Unbalanced tags are the milder version: the
+// message simply fails to send.
+//
+// So every interpolated value that did not originate in this file goes through
+// esc(). Telegram's HTML mode needs three characters escaped; length is capped
+// too, so a wall of text cannot push the real content off the screen.
+const esc = (v: unknown, max = 64) =>
+  String(v ?? '')
+    .slice(0, max)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
 // ── Market context (DexScreener) ─────────────────────────────────────────────
 // Our own quote is the on-chain truth about EXECUTION — what you would actually
 // receive. It deliberately says nothing about the market around it: volume, the
@@ -161,7 +184,7 @@ function marketLine(m: Market | null): string {
   if (!m) return '';
   const move = m.chg24 === undefined ? '' : ` ${m.chg24 >= 0 ? '▲' : '▼'}${Math.abs(m.chg24).toFixed(1)}% 24h`;
   const age = m.ageDays === undefined ? '' : ` · pool ${m.ageDays}d old`;
-  return `\n📊 ${usd(m.priceUsd)}${move}\n   ${usd(m.liqUsd)} liq · ${usd(m.vol24)} 24h vol · ${m.dex ?? '?'}${age}`;
+  return `\n📊 ${usd(m.priceUsd)}${move}\n   ${usd(m.liqUsd)} liq · ${usd(m.vol24)} 24h vol · ${esc(m.dex ?? '?', 24)}${age}`;
 }
 
 // ── Whale alerts ─────────────────────────────────────────────────────────────
@@ -196,8 +219,8 @@ bot.command('price', async (ctx) => {
     const m = await market(addr);
     await ctx.reply(
       card(
-        `${sym} · price`,
-        `⚡ <b>1 WETH → ${q.amountOut} ${sym}</b>\n`
+        `${esc(sym, 16)} · price`,
+        `⚡ <b>1 WETH → ${q.amountOut} ${esc(sym, 16)}</b>\n`
         + `${impactLine(q.quote?.impactBps)}\n`
         + `est gas ${q.quote?.estGas ?? '?'}`
         + marketLine(m),
@@ -206,7 +229,7 @@ bot.command('price', async (ctx) => {
       { ...HTML, reply_markup: swapBtn('ETH', sym) },
     );
   } catch (e) {
-    await ctx.reply(`no route for ${sym} right now (${(e as Error).message})`);
+    await ctx.reply(`no route for ${esc(sym, 16)} right now`);
   }
 });
 
@@ -223,7 +246,7 @@ bot.command('quote', async (ctx) => {
     await ctx.reply(
       card(
         'Quote',
-        `<b>${amt} ${tIn.toUpperCase()} → ${q.amountOut} ${tOut.toUpperCase()}</b>\n`
+        `<b>${esc(amt, 24)} ${esc(tIn.toUpperCase(), 16)} → ${q.amountOut} ${esc(tOut.toUpperCase(), 16)}</b>\n`
         + `${impactLine(q.quote?.impactBps)}\n`
         + `route: ${q.quote?.hops} hop(s), ${q.quote?.legs} leg(s) · fee ${(q.quote?.feeBps ?? 28) / 100}%\n`
         + `surplus expected: ${q.quote?.hasSurplus ? 'yes → goes to <b>YOU</b>' : 'no'}`
@@ -233,7 +256,7 @@ bot.command('quote', async (ctx) => {
       { ...HTML, reply_markup: swapBtn(tIn.toUpperCase(), tOut.toUpperCase(), amt) },
     );
   } catch (e) {
-    await ctx.reply(`quote failed: ${(e as Error).message}`);
+    await ctx.reply(`quote failed: ${esc((e as Error).message, 120)}`);
   }
 });
 
@@ -265,20 +288,26 @@ bot.command('connect', (ctx) => {
 bot.command('scan', async (ctx) => {
   const token = (ctx.match || '').trim();
   if (!token) return ctx.reply('usage: /scan 0xTOKEN  (or a symbol)');
+  // The value also lands in a URL we hand back as a button. Accept only what a
+  // token reference can look like — an address or a ticker — so nothing can be
+  // smuggled into the link we put our name on.
+  if (!/^(0x[0-9a-fA-F]{40}|[A-Za-z0-9._-]{2,24})$/.test(token)) {
+    return ctx.reply('that does not look like a token address or symbol');
+  }
   try {
     const res = await fetch(
       `https://blazephoenix.xyz/api/xray?chain=${CHAIN}&token=${encodeURIComponent(token)}`,
       { signal: AbortSignal.timeout(12_000) },
     );
     const j = await res.json() as any;
-    if (!j?.ok) return ctx.reply(`scan failed: ${j?.error ?? 'unknown'}`);
+    if (!j?.ok) return ctx.reply(`scan failed: ${esc(j?.error ?? 'unknown', 120)}`);
     const s = j.summary ?? {};
     await ctx.reply(
       card(
-        `${j.token?.symbol ?? token} · pool X-Ray`,
+        `${esc(j.token?.symbol ?? token, 24)} · pool X-Ray`,
         `advertised <b>${usd(s.reportedLiquidityUsd)}</b> · real <b>${usd(s.realLiquidityUsd)}</b>\n`
         + `phantom <b>${s.phantomPct ?? '?'}%</b> · max safe trade ${usd(s.maxSafeTradeUsd)}\n`
-        + `reading: <code>${s.verdict ?? 'insufficient_data'}</code>`,
+        + `reading: <code>${esc(s.verdict ?? 'insufficient_data', 24)}</code>`,
         'Not a verdict on the project — the arithmetic, so you can decide.',
       ),
       {
@@ -288,7 +317,7 @@ bot.command('scan', async (ctx) => {
       },
     );
   } catch (e) {
-    await ctx.reply(`scan unavailable: ${(e as Error).message}`);
+    await ctx.reply(`scan unavailable: ${esc((e as Error).message, 120)}`);
   }
 });
 
