@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0
+
+### Robinhood Chain (4663)
+The SDK now covers all five deployments. `resolveChain` accepts `robinhood`,
+`rh`, `robinhood-chain` or `4663`, and `CHAINS[4663]` carries the verified
+Router, Quoter, Hub and Solver plus a keyless public RPC. One thing to note when
+you wire it: the chain's dollar asset is **USDG, not USDC** — the `usdc` field
+holds the chain's canonical dollar token, and a test now pins that address so it
+cannot silently drift.
+
+### Bring your own RPC (optional, everywhere)
+`rpc` is accepted per request and as a client-wide default:
+
+```ts
+const blaze = new BlazePhoenix({ rpc: process.env.MY_RPC });  // once, for every call
+await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n });
+```
+
+The API reads through your node instead of its shared pool. The service is free
+and keyless either way and always has been — this exists so sustained
+automation can carry its own read volume, which is what keeps the free path
+viable for callers who cannot bring a node. Your node is tried first and the
+public pool remains the fallback, so supplying one can only improve reliability.
+`meta.rpc` reports `byo` or `shared`. If you run a bot, this is the single most
+considerate line you can add.
+
+### Phoenix Bot example — market context, whale alerts, wallet connect
+- `/price` now prints the on-chain execution number **and** DexScreener's market
+  reading (price, 24h move, liquidity, volume, pool age) side by side, labelled
+  so nobody confuses a reproducible number with a third party's reading.
+- `/scan` runs the phantom-liquidity X-Ray on any token: advertised depth versus
+  the balances the pools actually hold.
+- `/watch` prices each fill and marks the big ones 🐋 (`WHALE_MIN_USD`, default
+  $10,000). If the market read is unavailable the fill still reports — we do not
+  invent a number to make an alert fire.
+- `/connect` opens the app as a Telegram Mini App so the user connects **there**,
+  with 300+ wallets. The bot holds no keys and cannot move funds, because it
+  never touches them.
+
 ## 0.4.0 — 2026-07-15
 
 - **RPC is now optional everywhere.** `quoteOnChain` / `watchFills` / `getFills`

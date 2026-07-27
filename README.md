@@ -120,6 +120,27 @@ npm i grammy viem
 BOT_TOKEN=... RPC_URL=https://your-base-rpc npx tsx examples/phoenix-bot.ts
 ```
 
+## Bring your own RPC (optional, v0.5.0)
+
+Set `rpc` once on the client and every read goes through **your** node instead
+of the shared pool:
+
+```ts
+const blaze = new BlazePhoenix({ rpc: process.env.MY_RPC });
+// or per call:
+await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, rpc });
+```
+
+The service stays **free and keyless either way** — this exists so sustained
+automation carries its own read volume, which is what keeps the free path
+viable for callers who cannot bring a node. Your node is tried first and the
+public pool remains the fallback, so supplying one can only make calls more
+reliable, never less. `meta.rpc` in the response reads `byo` or `shared`.
+
+Any free tier is enough. Lock the key to your domain or IP in the provider
+dashboard if it will run in a browser. Full guide:
+<https://blazephoenix.xyz/learn/bring-your-own-rpc>
+
 ## Errors
 
 HTTP-level failures throw `BlazeApiError` with a stable `code`:

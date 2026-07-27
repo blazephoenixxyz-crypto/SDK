@@ -34,6 +34,17 @@ export interface ClientOptions {
   /** Micro-cache for PREVIEW quotes (no recipient, no exact) — absorbs hot
    *  loops without serving stale execution data. Default 1000ms; 0 disables. */
   cacheTtlMs?: number;
+  /**
+   * YOUR OWN https RPC endpoint, applied to every request that does not set its
+   * own. The API reads through your node instead of its shared pool.
+   *
+   * The service stays free and keyless either way — this exists so sustained
+   * automation carries its own read volume, which is what keeps the free path
+   * viable for callers who cannot bring a node. Your node is tried first and
+   * ours remain the fallback, so this can only improve reliability. If you are
+   * running a bot, this is the single most considerate line you can add.
+   */
+  rpc?: string;
 }
 
 function toSearch(req: QuoteRequest): URLSearchParams {
@@ -46,6 +57,10 @@ function toSearch(req: QuoteRequest): URLSearchParams {
   if (req.slippageBps !== undefined) sp.set('slippageBps', String(req.slippageBps));
   if (req.deadlineSec !== undefined) sp.set('deadlineSec', String(req.deadlineSec));
   if (req.exact) sp.set('exact', '1');
+  // The caller's own node, when they brought one. The API validates it and
+  // silently ignores anything unsafe, so a bad value degrades to the normal
+  // free path rather than failing the request.
+  if (req.rpc) sp.set('rpc', req.rpc.trim());
   return sp;
 }
 
@@ -55,6 +70,8 @@ export class BlazePhoenix {
   private readonly timeoutMs: number;
   private readonly retries: number;
   private readonly cacheTtlMs: number;
+  /** Default BYO-RPC endpoint applied to every request that does not set one. */
+  private readonly rpc?: string;
 
   constructor(opts: ClientOptions = {}) {
     this.base = (opts.baseUrl ?? API_BASE).replace(/\/+$/, '');
@@ -62,12 +79,18 @@ export class BlazePhoenix {
     this.timeoutMs = opts.timeoutMs ?? 15_000;
     this.retries = opts.retries ?? 2;
     this.cacheTtlMs = opts.cacheTtlMs ?? 1_000;
+    this.rpc = opts.rpc;
     if (!this.fetchFn) throw new Error('No fetch available — Node >= 18 required (or pass fetchFn)');
+  }
+
+  /** Fold the client-wide BYO-RPC default into a request that omits one. */
+  private withRpc(req: QuoteRequest): QuoteRequest {
+    return this.rpc && !req.rpc ? { ...req, rpc: this.rpc } : req;
   }
 
   /** Build the GET /api/quote URL for a request (useful for logging/debugging). */
   quoteUrl(req: QuoteRequest): string {
-    return `${this.base}/api/quote?${toSearch(req).toString()}`;
+    return `${this.base}/api/quote?${toSearch(this.withRpc(req)).toString()}`;
   }
 
   private async call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -91,7 +114,8 @@ export class BlazePhoenix {
   /** One quote — previewPlan computed on-chain. Throws BlazeApiError on failure.
    *  Identical concurrent calls share one request; preview quotes ride a tiny
    *  micro-cache (cacheTtlMs) so hot loops never hammer the wire. */
-  async quote(req: QuoteRequest): Promise<QuoteResponse> {
+  async quote(reqIn: QuoteRequest): Promise<QuoteResponse> {
+    const req = this.withRpc(reqIn);
     const qs = toSearch(req).toString();
     const key = `Q ${this.base}?${qs}`;
     const cacheable = !req.recipient && !req.exact && this.cacheTtlMs > 0;

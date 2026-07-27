@@ -6,7 +6,7 @@
 
 export const API_BASE = 'https://blazephoenix.xyz';
 
-export type SupportedChainId = 1 | 8453 | 10 | 42161;
+export type SupportedChainId = 1 | 8453 | 10 | 42161 | 4663;
 
 export interface ChainInfo {
   chainId: SupportedChainId;
@@ -77,6 +77,23 @@ export const CHAINS: Record<SupportedChainId, ChainInfo> = {
       quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2',
     },
   },
+  // Robinhood Chain — the same bytecode as every other deployment, so every
+  // property proven elsewhere holds here. Note the USD asset is USDG, not
+  // USDC: the `usdc` field carries the chain's canonical dollar token, which
+  // on this chain is USDG. Explorer is Blockscout rather than an Etherscan.
+  4663: {
+    chainId: 4663,
+    name: 'Robinhood',
+    explorer: 'https://robinhoodchain.blockscout.com',
+    weth: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
+    usdc: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+    contracts: {
+      hub: '0x23113e72165a034265Ab8Bf2277CCB7a85Cb7483',
+      solver: '0x0c0d96B237FABa8FE5e8aE77754Ef29109D2B33f',
+      router: '0x7262e7483ab6f0db7b8f90eC3a9de3B02Ab36F6A',
+      quoter: '0xE1aE5f49013920CF71De8CED4043e14C4d63416b',
+    },
+  },
 };
 
 /** Accepts a chain id (number or numeric string) or a human alias. */
@@ -86,11 +103,13 @@ export function resolveChain(chain: number | string): SupportedChainId {
     '8453': 8453, base: 8453,
     '10': 10, op: 10, optimism: 10,
     '42161': 42161, arb: 42161, arbitrum: 42161, 'arbitrum-one': 42161,
+    '4663': 4663, rh: 4663, robinhood: 4663, 'robinhood-chain': 4663,
   };
   const id = aliases[String(chain).trim().toLowerCase()];
   if (!id) {
     throw new Error(
-      `Unsupported chain "${chain}" — use 8453/base, 1/eth, 10/optimism or 42161/arbitrum`,
+      `Unsupported chain "${chain}" — use 8453/base, 1/eth, 10/optimism, `
+      + `42161/arbitrum or 4663/robinhood`,
     );
   }
   return id;
@@ -120,6 +139,9 @@ export const PUBLIC_RPCS: Record<SupportedChainId, string[]> = {
     'https://arbitrum-one-rpc.publicnode.com',
     'https://arb1.arbitrum.io/rpc',
     'https://1rpc.io/arb',
+  ],
+  4663: [
+    'https://rpc.mainnet.chain.robinhood.com',
   ],
 };
 

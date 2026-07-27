@@ -6,7 +6,8 @@
 export type Address = `0x${string}`;
 export type Hex = `0x${string}`;
 
-/** Chain selector: id (1, 8453, 10, 42161) or name ("base", "eth", …). */
+/** Chain selector: id (1, 8453, 10, 42161, 4663) or name ("base", "eth",
+ *  "optimism", "arbitrum", "robinhood", …). */
 export type ChainRef = number | string;
 
 /** Token selector: 0x-address, ETH / WETH / USDC / BZPX, or (single-quote
@@ -30,6 +31,21 @@ export interface QuoteRequest {
   deadlineSec?: number;
   /** Execution-grade re-quote (previewPlanExact) — slower, sharper. */
   exact?: boolean;
+  /**
+   * YOUR OWN https RPC endpoint. When set, the API performs the read through
+   * your node instead of its shared pool.
+   *
+   * The service is free either way and always has been — this exists so that
+   * sustained automation can carry its own read volume, which is what keeps the
+   * free path viable for callers who cannot. Your node is tried first and the
+   * public pool remains the fallback, so supplying one can only make the call
+   * more reliable, never less. `meta.rpc` in the response reads "byo" when your
+   * node answered and "shared" when it did not.
+   *
+   * Set it once on the client (`new BlazePhoenix({ rpc })`) rather than per
+   * call, unless a particular request needs a different node.
+   */
+  rpc?: string;
 }
 
 export interface QuoteLeg {
