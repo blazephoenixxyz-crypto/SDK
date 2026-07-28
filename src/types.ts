@@ -102,6 +102,17 @@ export interface QuoteTx {
   value: '0';
 }
 
+/** Phoenix Check — deterministic quote invariants, derived on-chain, that an
+ *  agent can act on. Fails closed: `verdict` is never greener than its weakest
+ *  invariant (blocked | danger | caution | ok). */
+export interface QuoteChecks {
+  verdict: 'blocked' | 'danger' | 'caution' | 'ok';
+  priceImpact: { bps: number; verdict: 'blocked' | 'danger' | 'caution' | 'ok'; hardLineBps: number; note: string };
+  ironFloor: { enforcedOnChain: boolean; armed: boolean; ironFloor: string; effectiveMinOut: string; note: string };
+  crossCheck: { basis: string; reproducible: boolean; note: string };
+  disclaimer: string;
+}
+
 export interface QuoteResponse {
   ok: true;
   mode: 'preview' | 'exact';
@@ -112,6 +123,8 @@ export interface QuoteResponse {
   /** Net output after the protocol fee — the number to compare across venues. */
   amountOut: string;
   quote?: QuoteSummary;          // preview mode
+  /** Phoenix Check verdicts — quote these when asked whether a swap is safe. */
+  checks?: QuoteChecks;
   route: QuoteRoute;
   tx?: QuoteTx;                  // present when `recipient` was sent
   wrapRequired: boolean;         // in=ETH → wrap to WETH first

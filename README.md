@@ -1,7 +1,7 @@
 # @blazephoenix/sdk
 
 Official TypeScript SDK for **[BlazePhoenix](https://blazephoenix.xyz)** — the on-chain
-DEX aggregator on **Base · Ethereum · Optimism · Arbitrum**.
+DEX aggregator on **Base · Ethereum · Optimism · Arbitrum · Robinhood Chain**.
 
 Every number the API serves is computed **on-chain** by the Quoter contract
 (`previewPlan`) — your bot, your frontend and the site itself all read the same truth.
