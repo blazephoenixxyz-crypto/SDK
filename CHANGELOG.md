@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.3
+
+### `QuoteChecks` is now exported
+The Phoenix Check type that ships on every `QuoteResponse.checks` is a public
+export, so consumers can type the deterministic verdict directly:
+
+```ts
+import type { QuoteChecks } from '@blazephoenix/sdk';
+```
+
+### Phoenix Bot — a complete, zero-custody Telegram bot
+`examples/phoenix-bot.ts` grew from a demo into a full bot, still holding **no
+keys**: all five chains with a tappable `/chain` and `/slippage`, human-readable
+amounts (decimals inferred, thousands separators), the **Phoenix Check** verdict
+on every quote, `/token` shareable group-call cards, `/hot` (the site Radar's
+most-traded tokens with per-token **phantom-liquidity** flags), `/about` + `/ask`
+(a curated, no-LLM project Q&A that never guesses), **inline mode** for group
+calls, the native command menu, and an owner-gated `/stats` (self-tracked, since
+Telegram exposes no usage API). Every trade still executes by deep-link into the
+user's own wallet — convenience, never custody.
+
 ## 0.5.0
 
 ### Robinhood Chain (4663)

@@ -21,7 +21,7 @@ export {
 } from './onchain.js';
 export type {
   Address, Hex, ChainRef, TokenRef,
-  QuoteRequest, QuoteResponse, QuoteSummary, QuoteRoute, QuoteHop, QuoteLeg, QuoteTx,
+  QuoteRequest, QuoteResponse, QuoteChecks, QuoteSummary, QuoteRoute, QuoteHop, QuoteLeg, QuoteTx,
   ApiErrorBody, BatchResult, BatchResponse,
   ManifestResponse, ManifestChain, Fill,
 } from './types.js';

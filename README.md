@@ -111,14 +111,31 @@ const stop = pollQuote(blaze,
 
 [`examples/phoenix-bot.ts`](examples/phoenix-bot.ts) is a complete Telegram bot
 with a difference: **it never holds a key**. It quotes on-chain truth, streams
-real fills (`/watch`), and executes by deep-linking users into their OWN wallet.
-The famous trading bots custody your funds; this one can't lose what it never
-touches.
+real fills (`/watch`), and executes by deep-linking users into their OWN wallet
+(they sign inside the Telegram Mini App). The famous trading bots custody your
+funds; this one can't lose what it never touches.
+
+**Commands:** `/price` · `/quote` · `/token` (shareable group call card) ·
+`/hot` (most-traded tokens + 🫧 phantom-liquidity flags, from the site Radar) ·
+`/chain` & `/slippage` (tappable, all 5 chains) · `/scan` (Pool X-Ray) ·
+`/watch`·`/stop` · `/connect` · `/about` · `/ask` (curated, no-LLM project Q&A) ·
+`/links` · `/menu` · `/stats` (owner-only usage). Every quote carries the
+deterministic **Phoenix Check** verdict. Works in groups and via **inline mode**
+(`@yourbot 0.5 ETH USDC` in any chat).
 
 ```bash
 npm i grammy viem
-BOT_TOKEN=... RPC_URL=https://your-base-rpc npx tsx examples/phoenix-bot.ts
+BOT_TOKEN=...            # from @BotFather (keep it secret; never paste in chat)
+RPC_URL=https://…        # optional — public endpoints used when unset
+WHALE_MIN_USD=10000      # optional — /watch 🐋 alert threshold
+METRICS_FILE=./stats.json # optional — persist /stats across restarts
+ADMIN_ID=123456789       # optional — lock /stats to your Telegram id
+npx tsx examples/phoenix-bot.ts
 ```
+
+Enable **inline mode** in @BotFather (`/setinline`) and set the avatar
+(`/setuserpic`) so the bot carries the brand. The `type QuoteChecks` import is
+type-only (elided at runtime), so the example runs against any published SDK.
 
 ## Bring your own RPC (optional, v0.5.0)
 
