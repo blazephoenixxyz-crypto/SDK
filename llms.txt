@@ -1,0 +1,55 @@
+# @blazephoenix/sdk
+
+> Official TypeScript SDK for BlazePhoenix, the on-chain DEX aggregator on Base, Ethereum,
+> Optimism, Arbitrum and Robinhood Chain. 1.x runs 100% on the integrator's OWN RPC — it is
+> mandatory: every quote is an eth_call from your process to your node, against the Quoter
+> contract that settles the swap. No BlazePhoenix API in the read path, no key, no RPC
+> endpoints shipped, no free fallback.
+
+## Install
+
+`npm i @blazephoenix/sdk viem` (or `npm i github:blazephoenixxyz-crypto/SDK viem`)
+
+## Quote → build → execute
+
+```ts
+import { BlazePhoenix } from '@blazephoenix/sdk';
+const blaze = new BlazePhoenix({ rpc: { base: process.env.BASE_RPC_URL } });
+const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5' });
+const plan = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5', recipient: me, from: me });
+const res = await blaze.execute({ wallet, plan }); // approve → simulate → swap, with YOUR viem WalletClient
+```
+
+- `q.amountOut`: net output after the 0.28% fee (bigint, base units) — compare this across venues.
+- `q.checks.verdict`: ok · caution · danger · blocked (fails closed).
+- `plan.encodedBy`: 'quoter' on 2.x (the Quoter's previewAndEncode bytes, verified field by
+  field: amount, recipient, deadline, route, minOut ≥ on-chain floor) · 'sdk' on 1.x.
+
+## Your RPC (required)
+
+`rpc` accepts a URL, a fallback list of URLs, an EIP-1193 provider (a wallet), any viem
+Transport, or a per-chain map of those; or env `BLAZEPHOENIX_RPC_BASE` / `_ETHEREUM` /
+`_OPTIMISM` / `_ARBITRUM` / `_ROBINHOOD` / `BLAZEPHOENIX_RPC_URL`. Each node's chain id is
+checked once (`rpc_chain_mismatch`); a chain without a node throws `rpc_required`.
+
+## Protocol versions
+
+`version: 'latest' | '1' | '2' | '2.0.0'` per client or per call. 1.0.0 is live on all five
+chains; 2.0.0 (final Core / Hub / Solver / Quoter / Router) is picked up from
+https://blazephoenix.xyz/api/deployments the day it deploys, after on-chain verification on
+YOUR RPC (code, VERSION(), Hub/Solver wiring). Embedded addresses are pins nothing remote can
+move; `contracts` overrides always win; `registry: { mode: 'embedded' }` never fetches.
+
+## Errors
+
+`BlazeError` with stable `code`: rpc_required · rpc_chain_mismatch · rpc_error · no_route ·
+not_executable · calldata_mismatch · deployment_unverified · unsupported_by_version ·
+not_deployed · bad_request · unauthorized · wallet_chain_mismatch · reverted. Protocol reverts are decoded
+to the reason in the contract's own source.
+
+## Links
+
+- Source: https://github.com/blazephoenixxyz-crypto/SDK
+- MCP server (wraps this SDK for AI agents): https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp
+- Contracts: https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex
+- Protocol corpus: https://blazephoenix.xyz/llms.txt

@@ -3,7 +3,7 @@
 Official TypeScript SDK for **[BlazePhoenix](https://blazephoenix.xyz)** — the on-chain
 DEX aggregator on **Base · Ethereum · Optimism · Arbitrum · Robinhood Chain**.
 
-**1.x runs 100% on YOUR RPC.** Every quote is an `eth_call` from your process to your
+**1.x runs 100% on YOUR RPC — it is mandatory.** Every quote is an `eth_call` from your process to your
 node, against the Quoter contract that settles the swap. There is no BlazePhoenix API
 in the read path, no key, and the package ships no RPC endpoints (a test enforces it).
 We don't pay for your reads, and you don't depend on our servers being up.
@@ -165,7 +165,9 @@ Every failure is a `BlazeError` with a stable `code`; protocol reverts carry `re
 ## MCP (AI agents)
 
 [`@blazephoenix/mcp`](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) wraps this SDK as
-a local MCP server — the agent's tools run on your machine, on your RPC.
+a local MCP server — the agent's tools run on your machine, on your RPC. The hosted
+`https://blazephoenix.xyz/mcp` and `GET /api/quote` follow the same rule: `rpc` is required,
+with no free fallback to BlazePhoenix nodes.
 
 ## Examples
 
