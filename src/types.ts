@@ -1,6 +1,6 @@
 // =============================================================================
-//  Wire types — mirror the public API responses (numbers travel as decimal
-//  strings; convert with BigInt(...) where you need math).
+//  Public types. Amounts are bigint everywhere (base units). `toJSON()` in
+//  json.ts turns any of these into a JSON-safe shape (decimal strings).
 // =============================================================================
 
 export type Address = `0x${string}`;
@@ -10,45 +10,12 @@ export type Hex = `0x${string}`;
  *  "optimism", "arbitrum", "robinhood", …). */
 export type ChainRef = number | string;
 
-/** Token selector: 0x-address, ETH / WETH / USDC / BZPX, or (single-quote
- *  endpoint only) ANY traded symbol — the API resolves unknown tickers to the
- *  deepest-liquidity token on that chain and echoes the resolution back in
- *  `resolved`. Pass 0x addresses when you need precision; the batch endpoint
- *  takes addresses/built-in symbols only. */
+/** Token selector: 0x-address, or one of the universal symbols every chain
+ *  carries: ETH (native), WETH, USDC (the chain's dollar asset), BZPX (Base).
+ *  Everything else: pass the 0x address — the SDK never guesses a token. */
 export type TokenRef = string;
 
-export interface QuoteRequest {
-  chain: ChainRef;
-  tokenIn: TokenRef;
-  tokenOut: TokenRef;
-  /** Input amount in the token's base units (wei-style). */
-  amountIn: bigint | string;
-  /** When set, the response includes ready-to-send `tx` calldata. */
-  recipient?: Address;
-  /** 0–5000. Default: the protocol's own execution floor (effectiveMinOut). */
-  slippageBps?: number;
-  /** 10–3600 seconds. Default 120. */
-  deadlineSec?: number;
-  /** Execution-grade re-quote (previewPlanExact) — slower, sharper. */
-  exact?: boolean;
-  /**
-   * YOUR OWN https RPC endpoint. When set, the API performs the read through
-   * your node instead of its shared pool.
-   *
-   * The service is free either way and always has been — this exists so that
-   * sustained automation can carry its own read volume, which is what keeps the
-   * free path viable for callers who cannot. Your node is tried first and the
-   * public pool remains the fallback, so supplying one can only make the call
-   * more reliable, never less. `meta.rpc` in the response reads "byo" when your
-   * node answered and "shared" when it did not.
-   *
-   * Set it once on the client (`new BlazePhoenix({ rpc })`) rather than per
-   * call, unless a particular request needs a different node.
-   */
-  rpc?: string;
-}
-
-export interface QuoteLeg {
+export interface Leg {
   pool: Address;
   hooks: Address;
   kind: number;
@@ -56,144 +23,227 @@ export interface QuoteLeg {
   tickSpacing: number;
   zeroForOne: boolean;
   stable: boolean;
-  amountIn: string;
-  expectedOut: string;
+  amountIn: bigint;
+  expectedOut: bigint;
   auxId: Hex;
 }
 
-export interface QuoteHop {
+export interface Hop {
   tokenIn: Address;
   tokenOut: Address;
-  amountIn: string;
-  expectedOut: string;
-  legs: QuoteLeg[];
+  amountIn: bigint;
+  expectedOut: bigint;
+  legs: readonly Leg[];
 }
 
-export interface QuoteRoute {
-  hops: QuoteHop[];
-  totalOut: string;
-  singleOut: string;
-  singleOutFloor: string;
-  expectedImpactBps: string;
-  confidenceWad: string;
-  estGas: string;
+export interface Route {
+  hops: readonly Hop[];
+  totalOut: bigint;
+  singleOut: bigint;
+  singleOutFloor: bigint;
+  expectedImpactBps: bigint;
+  confidenceWad: bigint;
+  estGas: bigint;
   hasSurplus: boolean;
   isV4Bundle: boolean;
 }
 
-export interface QuoteSummary {
-  grossOut: string;
-  protocolFee: string;
-  netOut: string;
-  ironFloor: string;
-  effectiveMinOut: string;
-  impactBps: number;
-  estGas: string;
-  hops: number;
-  legs: number;
+/** The Quoter's Preview struct, verbatim. */
+export interface Preview {
+  route: Route;
+  grossOut: bigint;
+  /** The EFFECT of the protocol fee on the output, in tokenOut. */
+  protocolFee: bigint;
+  safetyBuffer: bigint;
+  /** grossOut · (1 − fee) · (1 − safety) — the number to compare across venues. */
+  netOut: bigint;
+  /** Output floor supplied by the Solver (the Iron Law floor). */
+  ironFloor: bigint;
+  userMinOut: bigint;
+  /** max(userMinOut, ironFloor) — what the Router is asked to honour at least. */
+  effectiveMinOut: bigint;
+  estGas: bigint;
+  hops: bigint;
+  legs: bigint;
+  /** 0 direct, 1 via one bridge, 2 via two. */
+  topology: number;
+  bridgeUsed: Address;
   canExecute: boolean;
-  hasSurplus: boolean;
-  feeBps: number;
 }
 
-export interface QuoteTx {
-  to: Address;
-  data: Hex;
-  value: '0';
-}
+export type Verdict = 'blocked' | 'danger' | 'caution' | 'ok';
 
-/** Phoenix Check — deterministic quote invariants, derived on-chain, that an
- *  agent can act on. Fails closed: `verdict` is never greener than its weakest
- *  invariant (blocked | danger | caution | ok). */
+/** Phoenix Check — deterministic invariants derived from the on-chain preview.
+ *  Fails closed: `verdict` is never greener than its weakest invariant. */
 export interface QuoteChecks {
-  verdict: 'blocked' | 'danger' | 'caution' | 'ok';
-  priceImpact: { bps: number; verdict: 'blocked' | 'danger' | 'caution' | 'ok'; hardLineBps: number; note: string };
-  ironFloor: { enforcedOnChain: boolean; armed: boolean; ironFloor: string; effectiveMinOut: string; note: string };
-  crossCheck: { basis: string; reproducible: boolean; note: string };
+  verdict: Verdict;
+  priceImpact: { bps: number; verdict: Verdict; hardLineBps: number; cautionBps: number; note: string };
+  ironFloor: { enforcedOnChain: true; armed: boolean; ironFloor: bigint; effectiveMinOut: bigint; note: string };
+  routeShape: { consistent: boolean; hops: number; legs: number; note: string };
+  crossCheck: { basis: string; reproducible: true; note: string };
   disclaimer: string;
 }
 
-export interface QuoteResponse {
-  ok: true;
-  mode: 'preview' | 'exact';
+export interface QuoteRequest {
+  /** Optional when your client has a single RPC: the node's own chain is used. */
+  chain?: ChainRef;
+  tokenIn: TokenRef;
+  tokenOut: TokenRef;
+  /** Input in base units (bigint, or an integer string). */
+  amountIn?: bigint | string;
+  /** Input in HUMAN units ("1.5"); decimals are read from the token on your RPC. */
+  amount?: string;
+  /** Tighten the on-chain floor with your own minimum (base units of tokenOut). */
+  userMinOut?: bigint | string;
+  /** Protocol version for this call (default: the client's, itself 'latest'). */
+  version?: string;
+  /** Pin the read to a block (reproducibility / verification of past fills). */
+  blockNumber?: bigint;
+}
+
+export interface Quote {
   chainId: number;
+  version: string;
+  quoter: Address;
+  router: Address;
+  /** Where the contract set came from: embedded pin, remote registry, or your override. */
+  deploymentSource: 'embedded' | 'remote' | 'override';
+  /** As the Router sees them (native ETH already mapped to WETH). */
   tokenIn: Address;
   tokenOut: Address;
-  amountIn: string;
-  /** Net output after the protocol fee — the number to compare across venues. */
-  amountOut: string;
-  quote?: QuoteSummary;          // preview mode
-  /** Phoenix Check verdicts — quote these when asked whether a swap is safe. */
-  checks?: QuoteChecks;
-  route: QuoteRoute;
-  tx?: QuoteTx;                  // present when `recipient` was sent
-  wrapRequired: boolean;         // in=ETH → wrap to WETH first
-  unwrapAfter?: boolean;         // out=ETH → Router delivers WETH
-  /** Present when a symbol was resolved server-side: per side
-   *  { symbol, address, name?, liquidityUsd }. Always check it when quoting
-   *  by ticker — it tells you exactly which token you got. */
-  resolved?: Record<string, { symbol: string; address: Address; name?: string; liquidityUsd: number }>;
-  resolvedNote?: string;
-  executeWith?: { router: Address; function: string; note: string };
-  meta: { quotedAt: number; latencyMs: number; rpcTried: number };
+  amountIn: bigint;
+  /** Caller asked with ETH in: 2.x routes it via swapExactInNative (no pre-wrap). */
+  nativeIn: boolean;
+  /** Caller asked for ETH out: the Router delivers WETH — unwrap is yours. */
+  nativeOut: boolean;
+  /** Net output after the protocol fee and safety buffer (= preview.netOut). */
+  amountOut: bigint;
+  preview: Preview;
+  route: Route;
+  fallbackRoute?: Route;
+  checks: QuoteChecks;
+  blockNumber?: bigint;
+  quotedAt: number;
 }
 
-export interface ApiErrorBody {
-  ok: false;
-  code: string;
-  error: string;
-  chainId?: number;
-}
-
-export type BatchResult = QuoteResponse | ApiErrorBody;
-
-export interface BatchResponse {
-  ok: true;
-  count: number;
-  results: BatchResult[];
-}
-
-export interface ManifestChain {
+export interface ExactQuote {
   chainId: number;
-  name: string;
-  live: boolean;
-  explorer: string;
-  contracts: { hub: Address; solver: Address; router: Address; quoter: Address; staking: Address };
-  weth: Address;
-  usdc: Address;
-  bzpx?: Address;
-}
-
-export interface ManifestResponse {
-  ok: true;
-  name: string;
   version: string;
-  url: string;
-  docs: string;
-  quoteApi: string;
-  token: { symbol: string; chain: string; address: Address; basescan: string; totalSupply: string };
-  feeBps: number;
-  chains: ManifestChain[];
-  events: Record<string, { signature: string; topic0: Hex }>;
-  contact: string;
+  tokenIn: Address;
+  tokenOut: Address;
+  amountIn: bigint;
+  /** Execution-grade NET output (every concentrated leg dry-run on the pool). */
+  exactOut: bigint;
+  route: Route;
+  quotedAt: number;
 }
 
-export interface HealthResponse {
-  ok: true;
-  service: string;
-  version: string;
-  now: number;
-  chains: { chainId: number; name: string; live: boolean }[];
+export interface TxRequest {
+  chainId: number;
+  to: Address;
+  data: Hex;
+  value: bigint;
 }
 
-/** A decoded on-chain fill (Router `Swap` event). */
+export interface SwapRequest extends QuoteRequest {
+  /** Who receives tokenOut. */
+  recipient: Address;
+  /** The account that will send the swap — enables the allowance check and simulation. */
+  from?: Address;
+  /** Default 50 (0.5%). minOut = netOut − slippage, never below the on-chain floor. */
+  slippageBps?: number;
+  /** Seconds from now (default 120, 10–3600) — or pass an absolute `deadline`. */
+  deadlineSec?: number;
+  deadline?: bigint;
+  /**
+   * 'route' (default) — execute exactly the route the Quoter returned.
+   * 'best'  — 2.x only: Router.swapBestExactIn re-solves in the same transaction
+   *           (no quote-to-execution seam; costs the solve on top).
+   */
+  mode?: 'route' | 'best';
+  /** Allowance to request when approval is needed: 'exact' (default) or 'max'. */
+  approve?: 'exact' | 'max';
+}
+
+export interface ApprovalStep {
+  token: Address;
+  spender: Address;
+  amount: bigint;
+  /** Current allowance, when `from` was given (undefined = not checked). */
+  current?: bigint;
+  tx: TxRequest;
+}
+
+export interface SwapPlan {
+  quote: Quote;
+  entry: 'swapExactIn' | 'swapExactInNative' | 'swapBestExactIn';
+  /** 'quoter': the bytes are the Quoter's own previewAndEncode output (2.x),
+   *  verified field-by-field against what you asked; 'sdk': encoded locally. */
+  encodedBy: 'quoter' | 'sdk';
+  tx: TxRequest;
+  recipient: Address;
+  minOut: bigint;
+  deadline: bigint;
+  slippageBps: number;
+  /** null → no approval needed (native input, or allowance already sufficient). */
+  approval: ApprovalStep | null;
+  /** tokenOut was ETH: the Router delivered WETH — `buildUnwrapTx` to finish. */
+  unwrapAfter: boolean;
+  /** Ordered transactions to send: [approval?, swap]. */
+  steps: TxRequest[];
+}
+
+export interface SimulationResult {
+  ok: boolean;
+  amountOut?: bigint;
+  error?: DecodedError;
+}
+
+export interface DecodedError {
+  contract: 'Router' | 'Quoter' | 'Solver' | 'Hub' | 'unknown';
+  name: string;
+  code?: number;
+  reason: string;
+}
+
+/** A decoded on-chain fill (Router `Swap`, plus the 2.x `ExecutionProof`). */
 export interface Fill {
   txHash: Hex;
   blockNumber: bigint;
+  logIndex: number;
   user: Address;
   tokenIn: Address;
   tokenOut: Address;
   amountIn: bigint;
   amountOut: bigint;
   legs: bigint;
+  proof?: { quoted: bigint; realized: bigint; floorUsed: bigint };
+}
+
+export interface TokenInfo {
+  chainId: number;
+  address: Address;
+  symbol: string;
+  name: string;
+  decimals: number;
+  native: boolean;
+}
+
+export interface SolvencyReport {
+  chainId: number;
+  staking: Address;
+  isSolvent: boolean;
+  backing: bigint;
+  owed: bigint;
+  surplus: bigint;
+  deficit: bigint;
+  collateralRatioWad: bigint;
+  totalStaked: bigint;
+  totalDebt: bigint;
+  rewardReserve: bigint;
+  protocolReserve: bigint;
+  pendingDistribution: bigint;
+  totalBadDebt: bigint;
+  totalUncollectedInterest: bigint;
+  blockNumber: bigint;
 }

@@ -9,23 +9,34 @@
 //  Commands:
 //    /price [SYM]            → 1 WETH → SYM quote (default BZPX)
 //    /quote AMT IN OUT       → full quote: output, impact, gas + swap button
-//    /watch                  → stream every BlazePhoenix fill on Base (needs RPC_URL)
+//    /watch                  → stream every BlazePhoenix fill on the chat's chain
 //    /stop                   → stop the stream
 //
-//  Run:
-//    npm i grammy viem && npm i github:blazephoenixxyz-crypto/SDK
-//    BOT_TOKEN=... RPC_URL=https://your-base-rpc npx tsx examples/phoenix-bot.ts
+//  Run — the bot reads the chain through YOUR nodes (SDK 1.x ships none and
+//  never reads through blazephoenix.xyz):
+//    npm i grammy viem @blazephoenix/sdk
+//    BOT_TOKEN=... BLAZEPHOENIX_RPC_BASE=https://your-base-node npx tsx examples/phoenix-bot.ts
+//  One variable per chain you want to serve: BLAZEPHOENIX_RPC_ETHEREUM,
+//  _OPTIMISM, _ARBITRUM, _ROBINHOOD (comma-separate several nodes for fallback).
+//  A chain without a node answers "no RPC configured" instead of a quote.
 // =============================================================================
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { Bot, InlineKeyboard, InlineQueryResultBuilder } from 'grammy';
 import {
-  BlazePhoenix, deepLink, watchFills, toBaseUnits, fromBaseUnits,
-  type QuoteChecks,
+  BlazePhoenix, deepLink, fromBaseUnits, minOutFor, rpcFromEnv,
+  type Quote, type QuoteChecks,
 } from '@blazephoenix/sdk';
 
 const bot = new Bot(process.env.BOT_TOKEN!);
-const blaze = new BlazePhoenix(); // retries + micro-cache built in (v0.3.0)
+// Every quote is an eth_call on YOUR node (RPC_URL is still honoured for a
+// single-chain bot). No node, no bot: we say so at start instead of failing later.
+const rpc = rpcFromEnv() ?? process.env.RPC_URL;
+if (!rpc) {
+  console.error('set BLAZEPHOENIX_RPC_BASE (and _ETHEREUM/_OPTIMISM/… for more chains) — the bot quotes on your own RPC');
+  process.exit(1);
+}
+const blaze = new BlazePhoenix({ rpc });
 
 const fmt = (v: string, dp = 6) => fromBaseUnits(v, 6, dp); // USDC-style display
 
@@ -96,16 +107,10 @@ const chainKeyOf = (ctx: any): string => chatChain.get(ctx.chat?.id) ?? 'base';
 const chainOf = (ctx: any) => CHAINS[chainKeyOf(ctx)];
 
 // ── Human-readable amounts ──────────────────────────────────────────────────
-// The API returns every amount in the token's base units (a wei-style integer),
-// and the response does NOT carry the token's decimals — so we infer them from
-// the symbol: dollar-stables settle in 6, wrapped-BTC in 8, everything else in
-// the EVM default of 18. Then the integer part is grouped with separators so a
-// price reads like a price (1,866.83) instead of a raw ledger figure.
-const DECIMALS: Record<string, number> = {
-  USDC: 6, USDT: 6, USDG: 6, USDBC: 6, EURC: 6, WBTC: 8, CBBTC: 8, TBTC: 18,
-};
-const decimalsOf = (sym: string) => DECIMALS[sym.toUpperCase()] ?? 18;
-
+// Quotes carry every amount in the token's base units (a wei-style integer).
+// The token's decimals are read from the chain on your node (and cached), then
+// the integer part is grouped so a price reads like a price (1,866.83) instead
+// of a raw ledger figure.
 const fmtAmount = (raw: string, dec: number) => {
   const s = fromBaseUnits(raw, dec, dec >= 8 ? 8 : 6);
   const n = Number(s);
@@ -113,7 +118,6 @@ const fmtAmount = (raw: string, dec: number) => {
   const dp = n >= 1000 ? 2 : n >= 1 ? 4 : 6;
   return n.toLocaleString('en-US', { maximumFractionDigits: dp });
 };
-const amountOf = (raw: string, sym: string) => fmtAmount(raw, decimalsOf(sym));
 
 
 // ── Brand layer ──────────────────────────────────────────────────────────────
@@ -187,13 +191,13 @@ const impactLine = (bps?: number) => {
  *  moving after you sign. It is derived by the contract, not by this bot. */
 const floorLine = (minOut: string | undefined, outSym: string) => {
   if (!minOut) return '';
-  return `\nguaranteed minimum <b>${amountOf(minOut, outSym)} ${esc(outSym.toUpperCase(), 16)}</b>`
+  return `\nguaranteed minimum <b>${minOut} ${esc(outSym.toUpperCase(), 16)}</b>`
     + ` — the Router reverts below this, whatever the market does`;
 };
 
 // ── Per-chat slippage cap (switchable with /slippage) ───────────────────────
 // Unset means "use the protocol's own on-chain floor" (effectiveMinOut) — the
-// safest default, and what the API applies when we send no slippageBps. A user
+// safest default (the SDK's buildSwap never goes below it either). A user
 // who wants a looser or tighter cap sets it here, in percent, and every quote
 // from then on carries it.
 const chatSlip = new Map<number, number>();
@@ -310,6 +314,8 @@ const esc = (v: unknown, max = 64) =>
 interface Market {
   priceUsd?: number; liqUsd?: number; vol24?: number; chg24?: number;
   dex?: string; url?: string; ageDays?: number;
+  /** The token the search matched (by address or ticker), when known. */
+  token?: { address: string; symbol: string };
 }
 
 async function market(addressOrSymbol: string, dexChain: string): Promise<Market | null> {
@@ -325,7 +331,11 @@ async function market(addressOrSymbol: string, dexChain: string): Promise<Market
       .filter((p) => p.chainId === dexChain)
       .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
     if (!best) return null;
+    const q = addressOrSymbol.toLowerCase();
+    const side = [best.baseToken, best.quoteToken].find((t: any) =>
+      typeof t?.address === 'string' && (t.address.toLowerCase() === q || String(t.symbol ?? '').toLowerCase() === q));
     return {
+      ...(side ? { token: { address: side.address, symbol: String(side.symbol) } } : {}),
       priceUsd: Number(best.priceUsd) || undefined,
       liqUsd: best.liquidity?.usd,
       vol24: best.volume?.h24,
@@ -348,6 +358,42 @@ function marketLine(m: Market | null): string {
   const move = m.chg24 === undefined ? '' : ` ${m.chg24 >= 0 ? '▲' : '▼'}${Math.abs(m.chg24).toFixed(1)}% 24h`;
   const age = m.ageDays === undefined ? '' : ` · pool ${m.ageDays}d old`;
   return `\n📊 ${usd(m.priceUsd)}${move}\n   ${usd(m.liqUsd)} liq · ${usd(m.vol24)} 24h vol · ${esc(m.dex ?? '?', 24)}${age}`;
+}
+
+// ── Tickers → addresses, and a Quote → display view ─────────────────────────
+// The SDK never guesses a token from a ticker (a ticker is not an identity). The
+// bot does, the way the old API did: the deepest pool on the chat's chain wins,
+// and the address it picked is SHOWN on every card so nobody trades blind.
+const BUILTIN = new Set(['ETH', 'WETH', 'USDC', 'USDG', 'BZPX']);
+async function tokenRef(sym: string, dexChain: string): Promise<string> {
+  if (/^0x[0-9a-fA-F]{40}$/.test(sym) || BUILTIN.has(sym.toUpperCase())) return sym;
+  const m = await market(sym, dexChain);
+  if (m?.token?.address) return m.token.address;
+  throw new Error(`unknown token ${sym} — pass its 0x address`);
+}
+const decCache = new Map<string, number>();
+async function decimalsOn(sdkChain: string, token: string): Promise<number> {
+  const k = `${sdkChain}|${token.toLowerCase()}`;
+  const hit = decCache.get(k);
+  if (hit !== undefined) return hit;
+  const d = (await blaze.tokenInfo(sdkChain, token)).decimals;
+  decCache.set(k, d);
+  return d;
+}
+/** What the cards print, from an on-chain Quote (read on YOUR node). */
+async function view(q: Quote, sdkChain: string, slipBps?: number) {
+  const outDecimals = await decimalsOn(sdkChain, q.nativeOut ? 'ETH' : q.tokenOut).catch(() => 18);
+  const minOut = slipBps === undefined ? q.preview.effectiveMinOut : minOutFor(q.amountOut, slipBps, q.preview.effectiveMinOut);
+  return {
+    out: fmtAmount(q.amountOut.toString(), outDecimals),
+    minOut: fmtAmount(minOut.toString(), outDecimals),
+    impactBps: q.checks.priceImpact.bps,
+    estGas: q.preview.estGas.toString(),
+    hops: q.route.hops.length,
+    legs: q.route.hops.reduce((n, h) => n + h.legs.length, 0),
+    version: q.version,
+    tokenOut: q.tokenOut,
+  };
 }
 
 // ── Whale alerts ─────────────────────────────────────────────────────────────
@@ -476,17 +522,17 @@ bot.command('price', async (ctx) => {
   const ch = chainOf(ctx);
   try {
     const q = await blaze.quote({
-      chain: ch.sdk, tokenIn: 'WETH', tokenOut: sym, amountIn: 10n ** 18n,
-      slippageBps: slipOf(ctx),
+      chain: ch.sdk, tokenIn: 'WETH', tokenOut: await tokenRef(sym, ch.dex), amountIn: 10n ** 18n,
     });
-    const addr = q.resolved?.tokenOut?.address ?? sym;
-    const m = await market(addr, ch.dex);
+    const v = await view(q, ch.sdk);
+    const m = await market(q.tokenOut, ch.dex);
     await ctx.reply(
       card(
         `${esc(sym, 16)} · price · ${ch.label}`,
-        `⚡ <b>1 WETH → ${amountOf(q.amountOut, sym)} ${esc(sym, 16)}</b>\n`
-        + `${impactLine(q.quote?.impactBps)}\n`
-        + `est gas ${q.quote?.estGas ?? '?'}`
+        `⚡ <b>1 WETH → ${v.out} ${esc(sym, 16)}</b>\n`
+        + `<code>${q.tokenOut}</code>\n`
+        + `${impactLine(v.impactBps)}\n`
+        + `est gas ${v.estGas}`
         + marketLine(m)
         + checksLine(q.checks)
         + `\n\n${linksFooter}`,
@@ -518,15 +564,16 @@ async function xrayOf(sdkChain: string, token: string): Promise<any | null> {
 
 async function sendTokenCall(ctx: any, sym: string, chainKey?: string) {
   const ch = chainKey && CHAINS[chainKey] ? CHAINS[chainKey] : chainOf(ctx);
-  let q;
+  let q: Quote;
+  let v: Awaited<ReturnType<typeof view>>;
   try {
     q = await blaze.quote({
-      chain: ch.sdk, tokenIn: 'WETH', tokenOut: sym, amountIn: 10n ** 18n,
-      slippageBps: slipOf(ctx),
+      chain: ch.sdk, tokenIn: 'WETH', tokenOut: await tokenRef(sym, ch.dex), amountIn: 10n ** 18n,
     });
+    v = await view(q, ch.sdk);
   } catch { return ctx.reply(`no route for ${esc(sym, 16)} on ${ch.label} right now`); }
 
-  const addr = q.resolved?.tokenOut?.address ?? sym;
+  const addr = q.tokenOut;
   const [m, xray] = await Promise.all([market(addr, ch.dex), xrayOf(ch.sdk, addr)]);
   const s = xray?.summary;
   const xrayLine = s
@@ -546,8 +593,9 @@ async function sendTokenCall(ctx: any, sym: string, chainKey?: string) {
   await ctx.reply(
     card(
       `${esc(sym, 16)} · call · ${ch.label}`,
-      `⚡ <b>1 WETH → ${amountOf(q.amountOut, sym)} ${esc(sym, 16)}</b>\n`
-      + `${impactLine(q.quote?.impactBps)}`
+      `⚡ <b>1 WETH → ${v.out} ${esc(sym, 16)}</b>\n`
+      + `<code>${addr}</code>\n`
+      + `${impactLine(v.impactBps)}`
       + marketLine(m)
       + checksLine(q.checks)
       + xrayLine
@@ -648,20 +696,19 @@ bot.command('quote', async (ctx) => {
   try {
     const q = await blaze.quote({
       chain: ch.sdk,
-      tokenIn: inSym,
-      tokenOut: outSym,
-      amountIn: toBaseUnits(amt, decimalsOf(inSym)), // match the input token's decimals
-      slippageBps: slipOf(ctx),
+      tokenIn: await tokenRef(inSym, ch.dex),
+      tokenOut: await tokenRef(outSym, ch.dex),
+      amount: amt, // human units — the SDK reads the input token's decimals on your node
     });
+    const v = await view(q, ch.sdk, slipOf(ctx));
     await ctx.reply(
       card(
         `Quote · ${ch.label}`,
-        `<b>${esc(amt, 24)} ${esc(inSym, 16)} → ${amountOf(q.amountOut, outSym)} ${esc(outSym, 16)}</b>\n`
-        + `${impactLine(q.quote?.impactBps)}`
+        `<b>${esc(amt, 24)} ${esc(inSym, 16)} → ${v.out} ${esc(outSym, 16)}</b>\n`
+        + `${impactLine(v.impactBps)}`
         + `${slipLine(slipOf(ctx))}\n`
-        + `route: ${q.quote?.hops} hop(s), ${q.quote?.legs} leg(s) · fee ${(q.quote?.feeBps ?? 28) / 100}%\n`
-        + `surplus expected: ${q.quote?.hasSurplus ? 'yes → goes to <b>YOU</b>' : 'no'}`
-        + floorLine(q.quote?.effectiveMinOut, outSym)
+        + `route: ${v.hops} hop(s), ${v.legs} leg(s) · fee 0.28% · protocol v${v.version}`
+        + floorLine(v.minOut, outSym)
         + checksLine(q.checks)
         + `\n\n${linksFooter}`,
         'Phoenix Check is deterministic (no AI) and fails closed. Verify it against the chain.',
@@ -744,9 +791,11 @@ const watchers = new Map<number, () => void>();
 bot.command('watch', async (ctx) => {
   if (watchers.has(ctx.chat.id)) return ctx.reply('already watching — /stop to end');
   const ch = chainOf(ctx);
-  const unwatch = await watchFills({
+  let unwatch: () => void;
+  try {
+    unwatch = await blaze.watchFills({
     chain: ch.sdk,
-    rpcUrl: process.env.RPC_URL, // optional — public endpoints when unset
+    onError: () => { /* a node hiccup must not kill the stream */ },
     onFill: async (f) => {
       // Price the fill in dollars so "big" means something. The market read is
       // best-effort: if the indexer is unreachable the fill still reports, just
@@ -765,7 +814,10 @@ bot.command('watch', async (ctx) => {
         + txLink,
       );
     },
-  });
+    });
+  } catch (e) {
+    return ctx.reply(`cannot watch ${ch.label}: ${esc((e as Error).message, 160)}`);
+  }
   watchers.set(ctx.chat.id, unwatch);
   await ctx.reply(
     `👁 watching every BlazePhoenix fill on ${ch.label} — 🐋 alerts above ${usd(WHALE_MIN_USD)}.\n`
@@ -988,13 +1040,14 @@ bot.on('inline_query', async (ctx) => {
   if (!outSym) return ctx.answerInlineQuery([], { cache_time: 5 });
   try {
     const q = await blaze.quote({
-      chain: 'base', tokenIn: inSym, tokenOut: outSym,
-      amountIn: toBaseUnits(amt, decimalsOf(inSym)),
+      chain: 'base', tokenIn: await tokenRef(inSym, 'base'), tokenOut: await tokenRef(outSym, 'base'),
+      amount: amt,
     });
-    const title = `${amt} ${inSym} → ${amountOf(q.amountOut, outSym)} ${outSym}`;
+    const v = await view(q, 'base');
+    const title = `${amt} ${inSym} → ${v.out} ${outSym}`;
     const body = card(`${esc(inSym, 16)} → ${esc(outSym, 16)} · Base`,
-      `<b>${esc(amt, 24)} ${esc(inSym, 16)} → ${amountOf(q.amountOut, outSym)} ${esc(outSym, 16)}</b>\n`
-      + `${impactLine(q.quote?.impactBps)}`
+      `<b>${esc(amt, 24)} ${esc(inSym, 16)} → ${v.out} ${esc(outSym, 16)}</b>\n`
+      + `${impactLine(v.impactBps)}`
       + checksLine(q.checks)
       + `\n\n${linksFooter}`,
       'On-chain quote · zero custody · sign in your own wallet.');

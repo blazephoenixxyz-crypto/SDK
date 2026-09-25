@@ -1,7 +1,7 @@
 {
   "name": "@blazephoenix/sdk",
-  "version": "0.5.3",
-  "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, execute and index swaps on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain. No API key required.",
+  "version": "1.0.0",
+  "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, verify and execute swaps 100% on YOUR RPC (no API in the read path, no key, no endpoints shipped). Versioned deployments (1.x live, 2.x Core/Hub/Solver/Quoter/Router). Base, Ethereum, Optimism, Arbitrum, Robinhood Chain.",
   "keywords": [
     "blazephoenix",
     "bzpx",
@@ -13,9 +13,12 @@
     "ethereum",
     "optimism",
     "arbitrum",
-    "quote-api",
     "telegram-bot",
-    "viem"
+    "viem",
+    "byo-rpc",
+    "self-hosted",
+    "on-chain-quoter",
+    "mcp"
   ],
   "license": "MIT",
   "repository": {
@@ -49,15 +52,11 @@
     "test": "tsx scripts/test.ts",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+    "prepublishOnly": "npm run typecheck && npm run build && npm test",
+    "gen:abis": "node scripts/gen-abis.mjs ../Blaze-Phoenix-Dex"
   },
   "peerDependencies": {
-    "viem": ">=2.0.0"
-  },
-  "peerDependenciesMeta": {
-    "viem": {
-      "optional": true
-    }
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

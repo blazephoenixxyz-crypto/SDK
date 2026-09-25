@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.0 — 100% your RPC
+
+**Breaking.** The SDK no longer talks to `blazephoenix.xyz/api/quote` and ships no RPC
+endpoints. Every read is an `eth_call` from your process to the node you configure —
+BlazePhoenix pays for none of your reads, and none of them depends on our servers.
+
+### What changed
+- `new BlazePhoenix({ rpc })` — `rpc` is a URL, a list (your fallback order), an EIP-1193
+  provider, a viem Transport, or a per-chain map of those; or the `BLAZEPHOENIX_RPC_*`
+  environment variables (`rpcFromEnv`). Each node's `eth_chainId` is checked once
+  (`rpc_chain_mismatch`), and a chain without a node throws `rpc_required`.
+- **Versioned deployments.** `version: 'latest' | '1' | '2' | '2.0.0'` per client or per
+  call. 1.0.0 is live; 2.0.0 (the final Core/Hub/Solver/Quoter/Router generation) is
+  embedded as pending and reaches you through the site registry the day it is deployed —
+  pinned addresses cannot be moved remotely, and every remote-sourced set is verified on
+  your RPC before first use. `contracts` overrides always win; `registry: { mode: 'embedded' }`
+  turns the fetch off.
+- **ABIs generated from the Dex sources** (`scripts/gen-abis.mjs`, solc 0.8.36): full Core,
+  Hub, Solver, Quoter and Router ABIs, every custom error decodable.
+- `buildSwap` — on 2.x, `Quoter.previewAndEncode` returns the preview AND the Router
+  calldata in one call; the SDK decodes and verifies every field (amount, recipient,
+  deadline, route, minimum) before returning it (`calldata_mismatch` otherwise). On 1.x the
+  same `swapExactIn` call is encoded locally. Default slippage 0.5%, never below the
+  on-chain floor. Native ETH input (`swapExactInNative`) and `mode: 'best'`
+  (`swapBestExactIn`) on 2.x. Approval step with a live allowance check when `from` is set.
+- `simulate(plan, from)` and `execute({ wallet, plan })` — approve → simulate → swap →
+  realised `amountOut` from the receipt, signed by YOUR WalletClient.
+- `quote` accepts `amount` in human units (decimals read on your node), `quoteExact`,
+  `quoteBatch` (on-chain `batchQuote` on 2.x), `getFills`/`watchFills` (+ `ExecutionProof`),
+  `tokenInfo`, `solvency`, `deployments`, `verifyDeployment`, `toJSON`.
+- Errors: `BlazeError` with stable codes; protocol reverts decoded to the reason in the
+  contract's own source (`decodeBlazeError`).
+
+### Migrating from 0.5.x
+| 0.5.x | 1.0.0 |
+|---|---|
+| `new BlazePhoenix()` (our API) | `new BlazePhoenix({ rpc: { base: MY_RPC } })` |
+| `q.amountOut` (string) | `q.amountOut` (bigint) — `toJSON(q)` for strings |
+| `q.quote.impactBps` / `q.quote.effectiveMinOut` | `q.checks.priceImpact.bps` / `q.preview.effectiveMinOut` |
+| `quote({ …, recipient })` + `buildSwapTx(q)` | `buildSwap({ …, recipient })` → `plan.steps` |
+| `quoteOnChain` / `watchFills({ rpcUrl })` | `blaze.quote` / `blaze.watchFills` |
+| ticker resolution (`in=TOSHI`) | pass the 0x address (the SDK never guesses a token) |
+| `PUBLIC_RPCS` fallback | removed — bring your node |
+| `BlazeApiError` | `BlazeError` |
+
 ## 0.5.3
 
 ### `QuoteChecks` is now exported

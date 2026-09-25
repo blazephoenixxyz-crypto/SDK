@@ -3,220 +3,181 @@
 Official TypeScript SDK for **[BlazePhoenix](https://blazephoenix.xyz)** — the on-chain
 DEX aggregator on **Base · Ethereum · Optimism · Arbitrum · Robinhood Chain**.
 
-Every number the API serves is computed **on-chain** by the Quoter contract
-(`previewPlan`) — your bot, your frontend and the site itself all read the same truth.
-**No API key. No signup. Open CORS.**
-
-> Live docs & playground: **https://blazephoenix.xyz/?tab=api**
-
-```bash
-npm i github:blazephoenixxyz-crypto/SDK   # builds on install — no registry needed
-# (or, once published to npm:)  npm i @blazephoenix/sdk
-# optional (only for the on-chain module: quoteOnChain / watchFills / getFills):
-npm i viem
-```
-
-## Quote → approve → send (the whole loop)
-
-```ts
-import { BlazePhoenix, buildSwapTx, buildApproveTx, toBaseUnits } from '@blazephoenix/sdk';
-
-const blaze = new BlazePhoenix();
-const amountIn = toBaseUnits('1.5', 18);   // "1.5" WETH → 1500000000000000000n
-
-const q = await blaze.quote({
-  chain: 'base',                 // 8453 | 'base' | 1 | 'eth' | 10 | 42161 …
-  tokenIn: 'WETH',               // 0x-address, ETH/WETH/USDC/BZPX — or ANY traded
-                                 //   symbol ('TOSHI', 'DEGEN'…): resolved to the
-                                 //   deepest-liquidity token, echoed in q.resolved
-  tokenOut: 'USDC',
-  amountIn,
-  recipient: '0xYOU',            // ← makes the API return ready-to-send calldata
-  slippageBps: 50,
-});
-
-// once per token: allow the Router to pull tokenIn (exact amount — or MAX_UINT256)
-await wallet.sendTransaction(buildApproveTx({ chain: 'base', token: q.tokenIn, amount: amountIn }));
-// then execute exactly what was quoted:
-await wallet.sendTransaction(buildSwapTx(q));   // { to, data, value }
-```
-
-## Batch quotes (screeners / arb loops)
-
-```ts
-const { results } = await blaze.quoteBatch([
-  { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n },
-  { chain: 'base', tokenIn: 'WETH', tokenOut: 'BZPX', amountIn: 10n ** 18n },
-  { chain: 'arbitrum', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n },
-]); // one round-trip (max 10), per-item errors inline
-```
-
-## Deep links (bot buttons / referral posts)
-
-```ts
-import { deepLink } from '@blazephoenix/sdk';
-
-deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'BZPX', amount: '0.5' });
-// → https://blazephoenix.xyz/?tab=swap&chain=8453&in=ETH&out=BZPX&amt=0.5
-```
-
-## On-chain module (optional `viem` peer)
-
-Zero middlemen — same numbers, straight from the chain. **RPC optional since
-v0.4.0**: omit `rpcUrl` and the SDK falls back across public keyless endpoints
-(bring your own node for production throughput). Still zero providers and zero
-keys shipped — enforced by tests.
-
-```ts
-import { quoteOnChain, watchFills, getFills } from '@blazephoenix/sdk';
-
-const { preview } = await quoteOnChain({
-  chain: 'base', rpcUrl: RPC,
-  tokenIn: '0x4200000000000000000000000000000000000006',
-  tokenOut: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  amountIn: 10n ** 18n,
-});
-
-const unwatch = await watchFills({
-  chain: 'base', rpcUrl: RPC,
-  onFill: (f) => console.log(f.txHash, f.amountIn, '→', f.amountOut),
-});
-```
-
-`getFills({ chain, rpcUrl, fromBlock, toBlock })` gives you the raw fill history —
-the input for the **quoted-vs-executed verification pattern** documented on the
-API page: re-run each fill's quote at its block and compare with the executed
-amount the event recorded. Verify us, don't trust us.
-
-## Resilient by default (v0.3.0)
-
-Every call ships the same meta-patterns the BlazePhoenix edge runs — no config:
-
-- identical concurrent calls **coalesce into one request** (singleflight)
-- preview quotes ride a **1s micro-cache** (`cacheTtlMs`; never applied to
-  `recipient`/`exact` requests — execution data stays fresh, always)
-- transient failures (network, 429, 502–504) **retry with backoff** and honour
-  the server's `retry-after` (`retries`, default 2)
-
-```ts
-// a price loop in one line — overlap-safe, stop() when done:
-import { pollQuote } from '@blazephoenix/sdk';
-const stop = pollQuote(blaze,
-  { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n },
-  (q) => console.log('WETH→USDC', q.amountOut),
-  { intervalMs: 4000 });
-```
-
-## 🔥 Phoenix Bot — zero-custody Telegram bot
-
-[`examples/phoenix-bot.ts`](examples/phoenix-bot.ts) is a complete Telegram bot
-with a difference: **it never holds a key**. It quotes on-chain truth, streams
-real fills (`/watch`), and executes by deep-linking users into their OWN wallet
-(they sign inside the Telegram Mini App). The famous trading bots custody your
-funds; this one can't lose what it never touches.
-
-**Commands:** `/price` · `/quote` · `/token` (shareable group call card) ·
-`/hot` (most-traded tokens + 🫧 phantom-liquidity flags, from the site Radar) ·
-`/chain` & `/slippage` (tappable, all 5 chains) · `/scan` (Pool X-Ray) ·
-`/watch`·`/stop` · `/connect` · `/about` · `/ask` (curated, no-LLM project Q&A) ·
-`/links` · `/menu` · `/stats` (owner-only usage). Every quote carries the
-deterministic **Phoenix Check** verdict. Works in groups and via **inline mode**
-(`@yourbot 0.5 ETH USDC` in any chat).
+**1.x runs 100% on YOUR RPC.** Every quote is an `eth_call` from your process to your
+node, against the Quoter contract that settles the swap. There is no BlazePhoenix API
+in the read path, no key, and the package ships no RPC endpoints (a test enforces it).
+We don't pay for your reads, and you don't depend on our servers being up.
 
 ```bash
-npm i grammy viem
-BOT_TOKEN=...            # from @BotFather (keep it secret; never paste in chat)
-RPC_URL=https://…        # optional — public endpoints used when unset
-WHALE_MIN_USD=10000      # optional — /watch 🐋 alert threshold
-METRICS_FILE=./stats.json # optional — persist /stats across restarts
-ADMIN_ID=123456789       # optional — lock /stats to your Telegram id
-npx tsx examples/phoenix-bot.ts
+npm i @blazephoenix/sdk viem
+# or straight from GitHub (builds on install):  npm i github:blazephoenixxyz-crypto/SDK viem
 ```
 
-Enable **inline mode** in @BotFather (`/setinline`) and set the avatar
-(`/setuserpic`) so the bot carries the brand. The `type QuoteChecks` import is
-type-only (elided at runtime), so the example runs against any published SDK.
-
-## Bring your own RPC (optional, v0.5.0)
-
-Set `rpc` once on the client and every read goes through **your** node instead
-of the shared pool:
+## Quote → build → execute
 
 ```ts
-const blaze = new BlazePhoenix({ rpc: process.env.MY_RPC });
-// or per call:
-await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, rpc });
+import { BlazePhoenix } from '@blazephoenix/sdk';
+
+const blaze = new BlazePhoenix({
+  rpc: { base: process.env.BASE_RPC_URL },   // YOUR node — any provider's free tier is enough
+});
+
+// 1) the Quoter's preview, read on your node ("amount" is human units)
+const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5' });
+q.amountOut;           // net output after the 0.28% fee (bigint, base units)
+q.checks.verdict;      // Phoenix Check: ok | caution | danger | blocked (fails closed)
+q.version;             // protocol version that answered ('1.0.0' today, '2.0.0' once deployed)
+
+// 2) the swap transaction(s): verified calldata + the approval step if needed
+const plan = await blaze.buildSwap({
+  chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5',
+  recipient: me, from: me,           // `from` enables the allowance check
+  slippageBps: 50,                   // default 50; never below the on-chain floor
+});
+plan.steps;       // [approve?, swap] — { chainId, to, data, value }
+plan.minOut;      // the minimum the Router will enforce for you
+plan.encodedBy;   // 'quoter' on 2.x (the Quoter's own bytes, verified) · 'sdk' on 1.x
+
+// 3) optional: dry-run on your node, then execute with YOUR wallet
+await blaze.simulate(plan, me);                    // { ok, amountOut } or the decoded revert
+const res = await blaze.execute({ wallet, plan }); // approve → simulate → swap → receipt
+res.amountOut;                                     // realised, from the Router's Swap event
 ```
 
-The service stays **free and keyless either way** — this exists so sustained
-automation carries its own read volume, which is what keeps the free path
-viable for callers who cannot bring a node. Your node is tried first and the
-public pool remains the fallback, so supplying one can only make calls more
-reliable, never less. `meta.rpc` in the response reads `byo` or `shared`.
+`execute` takes a viem `WalletClient`. The SDK never asks for, stores or touches a key.
 
-Any free tier is enough. Lock the key to your domain or IP in the provider
-dashboard if it will run in a browser. Full guide:
-<https://blazephoenix.xyz/learn/bring-your-own-rpc>
+## Your RPC, your way
+
+```ts
+new BlazePhoenix({ rpc: 'https://your-base-node.example/KEY' });            // one node — its own chain
+new BlazePhoenix({ rpc: ['https://node-a.example', 'https://node-b.example'] }); // your fallback order
+new BlazePhoenix({ rpc: window.ethereum });                                  // the user's wallet (EIP-1193)
+new BlazePhoenix({ rpc: http('https://…', { batch: true }) });               // any viem Transport
+new BlazePhoenix({ rpc: { base: '…', eth: ['…', '…'], arbitrum: provider } }); // per chain
+new BlazePhoenix();   // reads BLAZEPHOENIX_RPC_BASE / _ETHEREUM / _OPTIMISM / _ARBITRUM / _ROBINHOOD
+                      // (comma-separated for fallback) or BLAZEPHOENIX_RPC_URL
+```
+
+- Each node is asked for `eth_chainId` once. Quoting Base contracts on an Ethereum node
+  throws `rpc_chain_mismatch` instead of returning garbage.
+- With a single node, `chain` may be omitted: the node's own chain is used.
+- A chain without a configured node throws `rpc_required` — nothing silently falls back
+  to someone else's infrastructure.
+- `https://` and `wss://` only (`http://` allowed for `localhost` — your anvil/geth).
+  URLs are redacted in every error message, because keys live in them.
+
+## Versions — pick yours
+
+Protocol versions are deployments, not SDK versions:
+
+| version | status | what it is |
+|---|---|---|
+| `1.0.0` | **live** on all five chains | the generation deployed at launch |
+| `2.0.0` | pending | the final Core / Hub / Solver / Quoter / Router from [BlazePhoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) (`VERSION()` = `"2.0.0"`) |
+
+```ts
+new BlazePhoenix({ rpc, version: 'latest' }); // default: newest version deployed on each chain
+new BlazePhoenix({ rpc, version: '1' });      // stay on 1.x
+await blaze.quote({ ...req, version: '2.0.0' }); // per call
+```
+
+The SDK adapts to what each version can do (`featuresOf(version)`):
+
+| capability | 1.x | 2.x |
+|---|---|---|
+| preview + Router calldata in ONE call (`previewAndEncode`) | — (encoded by the SDK) | ✅ verified field by field |
+| native ETH in, no pre-wrap (`swapExactInNative`) | wrap first: `buildWrapTx` | ✅ |
+| solve + execute in the same tx (`mode: 'best'` → `swapBestExactIn`) | — | ✅ |
+| on-chain `batchQuote` | parallel previews | ✅ chunked |
+| `ExecutionProof` on every fill (quoted vs realised vs floor) | — | ✅ |
+
+### New deployments reach you without a new SDK release
+
+The registry has three layers:
+
+1. **Embedded** — shipped in the package. Non-zero addresses are **pins**: nothing fetched
+   at runtime can move them.
+2. **Remote** — `GET https://blazephoenix.xyz/api/deployments` (static JSON, refreshed every
+   10 min). It can only fill what the snapshot doesn't know — e.g. the 2.0.0 addresses the day
+   they are deployed. Every remote-sourced set is **verified on your RPC before first use**:
+   code at every address, `VERSION()` matches, and the Quoter, Router and Solver all point at
+   the same Hub and Solver. Anything else fails closed (`deployment_unverified`).
+3. **Your overrides** — always win:
+
+```ts
+new BlazePhoenix({
+  rpc,
+  contracts: { base: { router: '0x…', quoter: '0x…', version: '2.0.0' } }, // your fork / audit target
+  registry: { mode: 'embedded' },   // never touch the network for addresses
+});
+await blaze.deployments();          // the chains × versions table this client sees
+await blaze.verifyDeployment({ chain: 'base' }); // run the on-chain checks yourself
+```
+
+## Why the calldata can be trusted
+
+On 2.x, `Quoter.previewAndEncode` returns the preview **and** the exact `swapExactIn` bytes that
+execute it. The Quoter's own source says what that is worth — *"a compromised Quoter fools the
+interface"* — so the SDK never forwards those bytes blind. It decodes them with the Router ABI
+and refuses (`calldata_mismatch`) unless the amount, recipient, deadline, the route
+(identical to the previewed one, connecting tokenIn → tokenOut) and a minimum at least the
+on-chain floor all match what you asked. Your slippage then only ever **tightens** that minimum.
+
+## More
+
+```ts
+await blaze.quoteExact(req);          // previewPlanExact: every concentrated leg dry-run on the pool
+await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, error }
+await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
+const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
+await blaze.tokenInfo('base', '0x…');  // symbol / name / decimals
+await blaze.solvency();                // the staking engine's proof-of-solvency (Base)
+toJSON(quote);                         // bigint → string, for HTTP / queues / LLMs
+```
+
+Pure helpers (no RPC): `buildApproveTx`, `buildWrapTx`, `buildUnwrapTx`, `permit2TypedData`,
+`encodeSwapExactInWithPermit2`, `encodeSwapExactIn`, `verifySwapExactIn`, `minOutFor`,
+`decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`.
+
+Tokens: `0x` addresses, or the universal symbols `ETH` (native), `WETH`, `USDC` (the chain's
+dollar asset — USDG on Robinhood), `BZPX`. Anything else: pass the address. The SDK never
+guesses a token from a ticker.
 
 ## Errors
 
-HTTP-level failures throw `BlazeApiError` with a stable `code`:
+Every failure is a `BlazeError` with a stable `code`; protocol reverts carry `revert`
+(`RouterE` / `QuoterE` / `SolverE` / `HubE` + the reason from the contract's own source):
 
 | code | meaning |
 |---|---|
-| `bad_*` (400) | invalid parameter — message names the field |
-| `no_route` (422) | Quoter reverted: no executable route for this pair/size |
-| `rpc_unreachable` (502) | all upstream RPCs failed — retry shortly |
+| `rpc_required` | no node configured for that chain |
+| `rpc_chain_mismatch` | the node serves a different chain |
+| `rpc_error` | your node failed (network, rate limit) |
+| `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
+| `not_executable` | the Quoter says the route cannot settle now (`canExecute = false`) |
+| `calldata_mismatch` | Quoter bytes did not match your request — refused |
+| `deployment_unverified` | a registry deployment failed on-chain verification |
+| `unsupported_by_version` | e.g. native ETH input on a 1.x Router |
+| `not_deployed` / `bad_request` / `wallet_chain_mismatch` / `reverted` | as named |
 
-## Reference
+## MCP (AI agents)
 
-- REST endpoint: `GET https://blazephoenix.xyz/api/quote`
-- Batch: `POST https://blazephoenix.xyz/api/quote/batch`
-- Manifest (contracts / token / event topics): `GET https://blazephoenix.xyz/api/manifest`
-- Examples: [`examples/`](examples) — plain quote, Telegram bot, fill watcher
-- Protocol fee: 0.28% on quoted output; **execution surplus is fee-exempt → user**
+[`@blazephoenix/mcp`](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) wraps this SDK as
+a local MCP server — the agent's tools run on your machine, on your RPC.
 
-## Deployed contracts (verified)
+## Examples
 
-![solvency](https://img.shields.io/endpoint?url=https%3A%2F%2Fblazephoenix.xyz%2Fapi%2Fbadge)
-— live `isSolvent()` read from the Base staking contract ·
-[full proof-of-solvency report](https://blazephoenix.xyz/solvency)
+[`examples/`](examples): `quote.ts`, `watch-fills.ts`, `telegram-bot.ts`, and
+[`phoenix-bot.ts`](examples/phoenix-bot.ts) — a complete zero-custody Telegram bot on your own nodes.
 
-| Chain | Contract | Address |
-|---|---|---|
-| Base (8453) | Router | [`0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f`](https://basescan.org/address/0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f) |
-| Base (8453) | Quoter | [`0x4cEF0615614B212895F45Aa1D4833B16666E18d3`](https://basescan.org/address/0x4cEF0615614B212895F45Aa1D4833B16666E18d3) |
-| Base (8453) | Staking | [`0x3f60C7aa0c36a78D200405feBE143d2Cf3fA0c77`](https://basescan.org/address/0x3f60C7aa0c36a78D200405feBE143d2Cf3fA0c77) |
-| Base (8453) | BZPX token | [`0x23113e72165a034265Ab8Bf2277CCB7a85Cb7483`](https://basescan.org/address/0x23113e72165a034265Ab8Bf2277CCB7a85Cb7483) |
-| Ethereum (1) | Router | [`0xE1aE5f49013920CF71De8CED4043e14C4d63416b`](https://etherscan.io/address/0xE1aE5f49013920CF71De8CED4043e14C4d63416b) |
-| Ethereum (1) | Quoter | [`0x4a20AA0912388ff7A9221Ab6BFC224cc20Baa0c3`](https://etherscan.io/address/0x4a20AA0912388ff7A9221Ab6BFC224cc20Baa0c3) |
-| Optimism (10) | Router | [`0x7262e7483ab6f0db7b8f90eC3a9de3B02Ab36F6A`](https://optimistic.etherscan.io/address/0x7262e7483ab6f0db7b8f90eC3a9de3B02Ab36F6A) |
-| Optimism (10) | Quoter | [`0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2`](https://optimistic.etherscan.io/address/0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2) |
-| Arbitrum (42161) | Router | [`0x7262e7483ab6f0db7b8f90eC3a9de3B02Ab36F6A`](https://arbiscan.io/address/0x7262e7483ab6f0db7b8f90eC3a9de3B02Ab36F6A) |
-| Arbitrum (42161) | Quoter | [`0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2`](https://arbiscan.io/address/0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2) |
+## Regenerating the ABIs
 
-Always cross-check against the live manifest: `https://blazephoenix.xyz/api/manifest`.
+The protocol ABIs are compiled from the Solidity sources, never written by hand:
 
-## Learn the engineering
-
-The protocol is documented from the deployed bytecode — every article ends with
-a command to reproduce its claims:
-
-- **The mathematics** (every formula; the originals are ours): https://blazephoenix.xyz/learn/the-mathematics
-- **Integrate any bot** (keyless / keyed / ethers / viem / Python / AI-agent): https://blazephoenix.xyz/learn/integrate-any-bot
-- **Web 2.5 vs Web 3.0** (the decision on-chain, not just settlement): https://blazephoenix.xyz/learn/web25-vs-web30
-- **Machine-readable measured cases**: https://blazephoenix.xyz/measured-cases.json
-- **Agent guide**: https://blazephoenix.xyz/llms.txt
-
-## Citing BlazePhoenix
-
-This repository ships a `CITATION.cff`, so GitHub shows a **“Cite this
-repository”** button. Please cite with attribution and a link — the protocol's
-original constructions (the Iron Law Φ, the Vitality Field Ψ, the
-Capital-Anchored Filter, the Master Conservation Identity) are © 2026
-BlazePhoenix.
+```bash
+npm i --no-save solc@0.8.36 && npm run gen:abis   # expects ../Blaze-Phoenix-Dex
+```
 
 ## License
 
-MIT — the SDK is deliberately permissive so anyone can integrate.
-(The BlazePhoenix protocol and site carry their own licenses.)
+MIT — deliberately permissive so anyone can integrate. The protocol contracts are BUSL-1.1.
