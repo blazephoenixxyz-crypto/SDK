@@ -49,6 +49,9 @@ export interface RegistryOptions {
   /** Refresh interval for the remote document (default 10 min). */
   ttlMs?: number;
   fetchFn?: typeof fetch;
+  /** Fetch timeout (default 3000 ms). Only the FIRST fetch of a process can
+   *  delay a call, and by at most this much; later refreshes run in the
+   *  background (stale-while-revalidate). */
   timeoutMs?: number;
   /** Called for every pin conflict or rejected document — never silently. */
   onWarning?: (msg: string) => void;
@@ -74,7 +77,7 @@ export class Registry {
     this.url = opts.url ?? DEPLOYMENTS_URL;
     this.ttlMs = opts.ttlMs ?? 10 * 60_000;
     this.fetchFn = opts.fetchFn ?? (globalThis.fetch as typeof fetch | undefined);
-    this.timeoutMs = opts.timeoutMs ?? 8_000;
+    this.timeoutMs = opts.timeoutMs ?? 3_000;
     this.warn = opts.onWarning ?? (() => {});
     this.doc = structuredClone(EMBEDDED_DEPLOYMENTS);
     for (const v of this.doc.versions) {
@@ -101,31 +104,43 @@ export class Registry {
     }
   }
 
+  /** Before a lookup: the first time, wait for the remote document (bounded
+   *  by timeoutMs); afterwards serve the current state and revalidate in the
+   *  background when stale. Never throws. */
+  async ready(): Promise<void> {
+    if (this.mode !== 'auto' || !this.fetchFn) return;
+    if (!this.fetchedAt) { await this.refresh(); return; }
+    if (Date.now() - this.fetchedAt >= this.ttlMs) void this.refresh();
+  }
+
   /** Fetch the remote document when stale (mode 'auto'). Never throws: a
    *  failed fetch keeps the last good state and is reported via onWarning. */
   async refresh(force = false): Promise<void> {
     if (this.mode !== 'auto' || !this.fetchFn) return;
     if (!force && this.fetchedAt && Date.now() - this.fetchedAt < this.ttlMs) return;
-    await singleflight(`registry ${this.url}`, async () => {
-      try {
+    // Concurrent refreshes of the same URL (several clients in one process)
+    // share ONE download — but every instance merges the document into its
+    // OWN state. (Sharing the merge too would leave the followers stale.)
+    try {
+      const raw = await singleflight(`registry ${this.url}`, async () => {
         const res = await resilientFetch(this.fetchFn!, this.url, { headers: { accept: 'application/json' } }, {
-          retries: 1, timeoutMs: this.timeoutMs,
+          retries: 0, timeoutMs: this.timeoutMs,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as unknown;
-        // The site wraps the document ({ ok, registry }); accept both shapes.
-        const raw = body && typeof body === 'object' && 'registry' in (body as object)
+        // The site wraps nothing today, but accept { registry: … } too.
+        return body && typeof body === 'object' && 'registry' in (body as object)
           ? (body as { registry: unknown }).registry : body;
-        this.merge(raw);
-        this.lastError = undefined;
-      } catch (e) {
-        this.lastError = (e as Error)?.message ?? String(e);
-        this.warn(`deployment registry fetch failed (${this.lastError}) — using the embedded snapshot`);
-      } finally {
-        // Back off on failure too: a dead URL must not be hit on every quote.
-        this.fetchedAt = Date.now();
-      }
-    });
+      });
+      this.merge(raw);
+      this.lastError = undefined;
+    } catch (e) {
+      this.lastError = (e as Error)?.message ?? String(e);
+      this.warn(`deployment registry fetch failed (${this.lastError}) — using the embedded snapshot`);
+    } finally {
+      // Back off on failure too: a dead URL must not be hit on every quote.
+      this.fetchedAt = Date.now();
+    }
   }
 
   /** Merge a registry document under the pinning rules. Exposed for tests and

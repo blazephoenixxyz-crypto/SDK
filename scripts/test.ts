@@ -174,6 +174,41 @@ console.log('registry');
   let fetched = false;
   await new Registry({ mode: 'embedded', fetchFn: (async () => { fetched = true; return new Response('{}'); }) as unknown as typeof fetch }).refresh();
   check("mode 'embedded' never touches the network", !fetched);
+
+  // ready(): the first lookup waits (bounded); later ones never block on the site.
+  let n = 0;
+  let release: () => void = () => {};
+  const slowFetch = (async () => {
+    n++;
+    if (n > 1) await new Promise<void>((r) => { release = r; });
+    return new Response(JSON.stringify({ schema: 1, versions: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const reg6 = new Registry({ mode: 'auto', fetchFn: slowFetch, ttlMs: 0 });
+  await reg6.ready();
+  eq('ready(): first call waits for the registry', n, 1);
+  const t0 = Date.now();
+  await reg6.ready(); // stale (ttl 0) → background revalidate, must not wait on the hanging fetch
+  check('ready(): later calls revalidate in the background (non-blocking)', Date.now() - t0 < 50 && n === 2);
+  release();
+  const timeouts: number[] = [];
+  const hang = ((_u: string, init?: RequestInit) => new Promise<Response>((_r, rej) => {
+    init?.signal?.addEventListener('abort', () => { timeouts.push(Date.now()); rej(new Error('aborted')); });
+  })) as unknown as typeof fetch;
+  const t1 = Date.now();
+  await new Registry({ mode: 'auto', url: 'https://registry-mirror.example/api/deployments', fetchFn: hang, timeoutMs: 200, onWarning: () => {} }).ready();
+  check('ready(): an unreachable site delays the first call by at most timeoutMs', Date.now() - t1 < 1_000 && timeouts.length === 1);
+
+  // Two clients in one process: one download, but BOTH registries learn the new addresses.
+  let downloads = 0;
+  const shared = (async () => {
+    downloads++;
+    await new Promise((r) => setTimeout(r, 20));
+    return new Response(JSON.stringify({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 42161: V2 } }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const ra = new Registry({ mode: 'auto', url: 'https://shared.example/r', fetchFn: shared });
+  const rb = new Registry({ mode: 'auto', url: 'https://shared.example/r', fetchFn: shared });
+  await Promise.all([ra.ready(), rb.ready()]);
+  eq('shared refresh: one download, every instance merges it', [downloads, ra.resolve(42161).version, rb.resolve(42161).version], [1, '2.0.0', '2.0.0']);
 }
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -229,7 +264,13 @@ function mockProvider(o: MockOpts = {}) {
       if (method === 'eth_chainId') { calls.push({ method }); return `0x${(o.chainId ?? 8453).toString(16)}`; }
       if (method === 'eth_blockNumber') return '0x100';
       if (method === 'eth_getCode') return '0x6080604052';
-      if (method === 'eth_getLogs') { calls.push({ method }); return logsFixture(router as Address); }
+      if (method === 'eth_getLogs') {
+        calls.push({ method });
+        const f = (p[0] ?? {}) as { fromBlock?: string; toBlock?: string };
+        const from = f.fromBlock ? BigInt(f.fromBlock) : 0n;
+        const to = f.toBlock && f.toBlock !== 'latest' ? BigInt(f.toBlock) : 1n << 64n;
+        return from <= 0xffn && 0xffn <= to ? logsFixture(router as Address) : [];
+      }
       if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
       const { to, data } = p[0] as { to: string; data: Hex };
       const t = to.toLowerCase();
@@ -426,6 +467,10 @@ console.log('client · 1.x');
 
   const fills = await blaze.getFills({ chain: 'base', fromBlock: 0n, toBlock: 255n });
   eq('getFills: Swap decoded + ExecutionProof joined', [fills.length, fills[0]?.amountOut, fills[0]?.proof?.floorUsed], [1, 3_000_000_000n, 2_700_000_000n]);
+  const before = calls.filter((c) => c.method === 'eth_getLogs').length;
+  const chunked = await blaze.getFills({ chain: 'base', fromBlock: 0n, toBlock: 4_999n, chunkBlocks: 2_000n });
+  eq('getFills: range read in provider-friendly chunks (3 × 2000 blocks), no duplicates',
+    [calls.filter((c) => c.method === 'eth_getLogs').length - before, chunked.length], [3, 1]);
 
   const ex = await blaze.quoteExact({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n });
   eq('quoteExact: previewPlanExact via eth_call', ex.exactOut, 3_000_000_000n - 5n);
@@ -492,6 +537,85 @@ console.log('client · remote registry verification');
     () => new BlazePhoenix({ rpc: wired, registry: { mode: 'auto', fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
   const v1still = await new BlazePhoenix({ rpc: good, version: '1', registry: { mode: 'auto', fetchFn } }).resolveDeployment({ chain: 'base' });
   eq('version pin "1" keeps the 1.x contracts', [v1still.version, v1still.contracts.router], ['1.0.0', V1.router]);
+}
+
+// ── execute(): approve → simulate → swap → realised output, with a real viem wallet ──
+console.log('client · execute');
+{
+  const { createWalletClient, custom, keccak256, parseTransaction, encodeAbiParameters: enc, encodeEventTopics: topics } = await import('viem');
+  const { privateKeyToAccount } = await import('viem/accounts');
+  const account = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d');
+  const ZERO_A = '0x0000000000000000000000000000000000000000';
+  const sent: { to: string; selector: string }[] = [];
+  let allowance = 0n;
+  const receipts = new Map<string, unknown>();
+  const swapEv = getAbiItem({ abi: ROUTER_ABI, name: 'Swap' });
+  const node = {
+    async request({ method, params }: { method: string; params?: unknown }) {
+      const p = (params ?? []) as unknown[];
+      switch (method) {
+        case 'eth_chainId': return '0x2105';
+        case 'eth_blockNumber': return '0x200';
+        case 'eth_getBlockByNumber': return { number: '0x200', hash: `0x${'11'.repeat(32)}`, parentHash: `0x${'22'.repeat(32)}`, timestamp: '0x6500000', baseFeePerGas: '0x3b9aca00', gasLimit: '0x1c9c380', gasUsed: '0x0', transactions: [], miner: ZERO_A, difficulty: '0x0', extraData: '0x', logsBloom: `0x${'00'.repeat(256)}`, nonce: '0x0000000000000000', receiptsRoot: `0x${'00'.repeat(32)}`, sha3Uncles: `0x${'00'.repeat(32)}`, size: '0x1', stateRoot: `0x${'00'.repeat(32)}`, totalDifficulty: '0x0', transactionsRoot: `0x${'00'.repeat(32)}`, uncles: [] };
+        case 'eth_maxPriorityFeePerGas': return '0x3b9aca00';
+        case 'eth_gasPrice': return '0x3b9aca00';
+        case 'eth_getTransactionCount': return `0x${sent.length.toString(16)}`;
+        case 'eth_estimateGas': return '0x30d40';
+        case 'eth_sendRawTransaction': {
+          const raw = p[0] as Hex;
+          const tx = parseTransaction(raw);
+          const hash = keccak256(raw);
+          sent.push({ to: String(tx.to).toLowerCase(), selector: (tx.data ?? '0x').slice(0, 10) });
+          const isApprove = (tx.data ?? '').startsWith('0x095ea7b3');
+          if (isApprove) allowance = 2n ** 255n;
+          const logs = isApprove ? [] : [{
+            address: V1.router, blockHash: `0x${'33'.repeat(32)}`, blockNumber: '0x201', transactionHash: hash, transactionIndex: '0x0', logIndex: '0x0', removed: false,
+            topics: topics({ abi: [swapEv], eventName: 'Swap', args: { user: account.address, tokenIn: WETH, tokenOut: USDC } }),
+            data: enc([{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }], [10n ** 18n, 2_995_000_000n, 1n]),
+          }];
+          receipts.set(hash, {
+            transactionHash: hash, transactionIndex: '0x0', blockHash: `0x${'33'.repeat(32)}`, blockNumber: '0x201',
+            from: account.address, to: tx.to, cumulativeGasUsed: '0x1', gasUsed: '0x1', effectiveGasPrice: '0x1',
+            contractAddress: null, logs, logsBloom: `0x${'00'.repeat(256)}`, status: '0x1', type: '0x2',
+          });
+          return hash;
+        }
+        case 'eth_getTransactionReceipt': return receipts.get(p[0] as string) ?? null;
+        case 'eth_getTransactionByHash': return null;
+        case 'eth_call': {
+          const { to, data } = p[0] as { to: string; data: Hex };
+          if (to.toLowerCase() === V1.quoter.toLowerCase()) {
+            const d = decodeFunctionData({ abi: QUOTER_ABI, data });
+            const [tIn, tOut, amt] = d.args as unknown as [Address, Address, bigint];
+            const route = mkRoute(tIn, tOut, amt, amt * 3_000n / 10n ** 12n);
+            return encodeFunctionResult({ abi: QUOTER_ABI, functionName: d.functionName as 'previewPlan', result: [mkPreview(route), route, false] as never });
+          }
+          if (to.toLowerCase() === V1.router.toLowerCase()) {
+            if (allowance === 0n) throw Object.assign(new Error('execution reverted'), { code: 3, data: encodeErrorResult({ abi: ROUTER_ABI, errorName: 'RouterE', args: [8] }) });
+            return encodeFunctionResult({ abi: ROUTER_ABI, functionName: 'swapExactIn', result: 2_995_000_000n });
+          }
+          const d = decodeFunctionData({ abi: ERC20_ABI, data });
+          if (d.functionName === 'allowance') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'allowance', result: allowance });
+          if (d.functionName === 'decimals') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'decimals', result: 18 });
+          throw new Error(`call ${d.functionName}`);
+        }
+        default: throw new Error(`unexpected ${method}`);
+      }
+    },
+  };
+  const wallet = createWalletClient({ account, transport: custom(node) });
+  const blaze = new BlazePhoenix({ rpc: node, registry: { mode: 'embedded' }, retries: 0 });
+  const res = await blaze.execute({
+    wallet,
+    request: { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address },
+  });
+  eq('execute: approve then swap, both signed by YOUR wallet', sent.map((t) => t.selector), ['0x095ea7b3', decodeFunctionData({ abi: ROUTER_ABI, data: res.plan.tx.data }).functionName === 'swapExactIn' ? res.plan.tx.data.slice(0, 10) : 'x']);
+  eq('execute: realised output read from the receipt', [res.status, res.amountOut], ['success', 2_995_000_000n]);
+  const again = await blaze.execute({ wallet, request: { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address } });
+  eq('execute: no second approval once the allowance exists', [sent.length, again.approvalHash], [3, undefined]);
+  const wrongWallet = createWalletClient({ account, transport: custom({ request: async (a: { method: string }) => (a.method === 'eth_chainId' ? '0x1' : node.request(a as never)) }) });
+  await throwsCode('execute: wallet on another chain refused before anything is signed',
+    () => blaze.execute({ wallet: wrongWallet, request: { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address } }), 'wallet_chain_mismatch');
 }
 
 // ── ERC-20 helpers ───────────────────────────────────────────────────────────

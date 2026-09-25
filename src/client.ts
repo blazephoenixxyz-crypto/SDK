@@ -149,7 +149,7 @@ export class BlazePhoenix {
 
   private async ctx(req: { chain?: string | number; version?: string }): Promise<Ctx> {
     const chainId = req.chain !== undefined ? resolveChain(req.chain) : await this.rpc.defaultChain();
-    await this.registry.refresh();
+    await this.registry.ready();
     const dep = this.registry.resolve(chainId, req.version ?? this.version);
     const client = await this.rpc.client(chainId);
     if (dep.source === 'remote' && this.verifyRemote) await this.ensureVerified(dep, client);
@@ -178,7 +178,7 @@ export class BlazePhoenix {
    *  VERSION() and the Hub/Solver wiring of the Quoter, Router and Solver. */
   async verifyDeployment(req: { chain?: string | number; version?: string } = {}): Promise<DeploymentReport> {
     const chainId = req.chain !== undefined ? resolveChain(req.chain) : await this.rpc.defaultChain();
-    await this.registry.refresh();
+    await this.registry.ready();
     const dep = this.registry.resolve(chainId, req.version ?? this.version);
     const client = await this.rpc.client(chainId);
     return this.checkDeployment(dep, client);
@@ -599,8 +599,10 @@ export class BlazePhoenix {
     }
     const client = await this.rpc.client(plan.tx.chainId);
     const wait = opts.wait ?? true;
+    // The wallet's own chain when it has one (viem then asserts it again at
+    // send time); null otherwise — we already checked the chain id above.
     const send = (tx: TxRequest) => wallet.sendTransaction({
-      account, chain: null, to: tx.to, data: tx.data, value: tx.value,
+      account, chain: wallet.chain ?? null, to: tx.to, data: tx.data, value: tx.value,
     } as never) as Promise<Hex>;
 
     let approvalHash: Hex | undefined;
@@ -678,16 +680,28 @@ export class BlazePhoenix {
     };
   }
 
-  /** Router fills over a block range (Swap events; 2.x adds ExecutionProof). */
-  async getFills(opts: { chain?: string | number; version?: string; fromBlock?: bigint; toBlock?: bigint; lookbackBlocks?: bigint }): Promise<Fill[]> {
+  /** Router fills over a block range (Swap events; 2.x adds ExecutionProof).
+   *  The range is read in chunks (`chunkBlocks`, default 2000) because most
+   *  providers cap eth_getLogs ranges — especially on free tiers. */
+  async getFills(opts: {
+    chain?: string | number; version?: string; fromBlock?: bigint; toBlock?: bigint;
+    lookbackBlocks?: bigint; chunkBlocks?: bigint;
+  }): Promise<Fill[]> {
     const ctx = await this.ctx(opts);
     const toBlock = opts.toBlock ?? await ctx.client.getBlockNumber();
     const span = opts.lookbackBlocks ?? BigInt(Math.ceil(3_600 / CHAINS[ctx.chainId].blockTime)); // ~1h
     const fromBlock = opts.fromBlock ?? (toBlock > span ? toBlock - span : 0n);
+    if (fromBlock > toBlock) throw new BlazeError('bad_request', 'fromBlock is after toBlock');
+    const chunk = opts.chunkBlocks && opts.chunkBlocks > 0n ? opts.chunkBlocks : 2_000n;
     const router = ctx.dep.contracts.router;
-    const raw = await ctx.client.getLogs({ address: router, fromBlock, toBlock })
-      .catch((e: unknown) => this.wrapReadError(e, 'getLogs'));
-    return toFills(raw);
+    const fills: Fill[] = [];
+    for (let start = fromBlock; start <= toBlock; start += chunk) {
+      const end = start + chunk - 1n > toBlock ? toBlock : start + chunk - 1n;
+      const raw = await ctx.client.getLogs({ address: router, fromBlock: start, toBlock: end })
+        .catch((e: unknown) => this.wrapReadError(e, `getLogs ${start}-${end}`));
+      fills.push(...toFills(raw));
+    }
+    return fills;
   }
 
   /** Stream fills as they land (polling your RPC). Returns an unwatch function. */
@@ -703,13 +717,13 @@ export class BlazePhoenix {
 
   /** The chains × versions table this client sees (embedded + registry + overrides). */
   async deployments() {
-    await this.registry.refresh();
+    await this.registry.ready();
     return { registry: this.registry.status(), rows: this.registry.table() };
   }
 
   /** Which deployment a request would use right now (no RPC). */
   async resolveDeployment(req: { chain: string | number; version?: string }): Promise<ResolvedDeployment & { features: VersionFeatures }> {
-    await this.registry.refresh();
+    await this.registry.ready();
     const dep = this.registry.resolve(resolveChain(req.chain), req.version ?? this.version);
     return { ...dep, features: featuresOf(dep.version) };
   }
