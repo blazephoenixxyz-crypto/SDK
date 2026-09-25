@@ -147,6 +147,10 @@ console.log('registry');
   eq('pinned 1.0.0 router cannot be moved by the registry', reg2.resolve(8453, '1').contracts.router, '0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f');
   check('pin conflict reported', warnings.some((w) => w.includes('pinned router')));
   eq('other chains still on 1.0.0', reg2.resolve(1).version, '1.0.0');
+  const wv = warnings.length;
+  reg2.merge({ schema: 1, versions: [{ version: '1.0.1', status: 'live', chains: { 1: { ...V2, router: '0x00000000000000000000000000000000000000b9' } } }] });
+  check('a NEW 1.x version from the registry (not verifiable on-chain) is ignored',
+    reg2.resolve(1).version === '1.0.0' && warnings.length === wv + 1 && warnings.at(-1)!.includes('1.0.1'));
   const w0 = warnings.length;
   reg2.merge({ schema: 1, versions: [{ version: '2.0.0', chains: { 8453: { router: 'nope' } } }] });
   check('malformed registry rejected with a warning', warnings.length === w0 + 1 && reg2.resolve(8453).contracts.router === V2.router);

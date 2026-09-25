@@ -98,8 +98,10 @@ The registry has three layers:
 1. **Embedded** — shipped in the package. Non-zero addresses are **pins**: nothing fetched
    at runtime can move them.
 2. **Remote** — `GET https://blazephoenix.xyz/api/deployments` (static JSON, refreshed every
-   10 min). It can only fill what the snapshot doesn't know — e.g. the 2.0.0 addresses the day
-   they are deployed. Every remote-sourced set is **verified on your RPC before first use**:
+   10 min in the background; the first lookup waits at most 3 s). It can only fill what the
+   snapshot doesn't know — e.g. the 2.0.0 addresses the day they are deployed — and only for
+   versions that can be verified on-chain (2.x+). Every remote-sourced set is **verified on
+   your RPC before first use**:
    code at every address, `VERSION()` matches, and the Quoter, Router and Solver all point at
    the same Hub and Solver. Anything else fails closed (`deployment_unverified`).
 3. **Your overrides** — always win:

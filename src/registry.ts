@@ -6,7 +6,8 @@
 //   • Embedded non-zero addresses are PINS. A remote document that disagrees
 //     with a pin is ignored for that field and reported via onWarning.
 //   • Remote can only fill what the snapshot does not know (zero addresses,
-//     new versions). The client verifies every remote-sourced set on YOUR RPC
+//     new 2.x+ versions — a new 1.x could not be verified on-chain, so it is
+//     refused). The client verifies every remote-sourced set on YOUR RPC
 //     before its first use (code exists, VERSION() matches, the Quoter and the
 //     Router point at the same Hub and Solver) and fails closed otherwise.
 //   • Your `contracts` overrides always win and are never second-guessed.
@@ -14,7 +15,7 @@
 // =============================================================================
 
 import {
-  CONTRACT_KEYS, EMBEDDED_DEPLOYMENTS, compareVersions, isDeployed, isValidSelector, isZero,
+  CONTRACT_KEYS, EMBEDDED_DEPLOYMENTS, compareVersions, featuresOf, isDeployed, isValidSelector, isZero,
   matchesSelector, validateRegistry,
   type ContractSet, type DeploymentRegistry, type DeploymentStatus, type VersionSelector,
 } from './deployments.js';
@@ -153,6 +154,14 @@ export class Registry {
     }
     for (const rv of v.registry.versions) {
       let local = this.doc.versions.find((x) => x.version === rv.version);
+      // A version this SDK has never heard of is only accepted when it can be
+      // verified on the user's RPC before use: 2.x contracts answer VERSION(),
+      // hub() and solver(); a "new" 1.x set could only be checked for code at
+      // an address — not enough to route anyone's approvals to it.
+      if (!local && !featuresOf(rv.version).introspection) {
+        this.warn(`registry announced unknown version ${rv.version}, which cannot be verified on-chain — ignored`);
+        continue;
+      }
       if (!local) {
         local = { version: rv.version, status: rv.status, chains: {} };
         if (rv.source) local.source = rv.source;
