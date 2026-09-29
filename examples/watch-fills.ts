@@ -1,14 +1,14 @@
-// Stream every BlazePhoenix fill on Base. Needs viem: npm i viem
-// RPC_URL=https://your-rpc npx tsx examples/watch-fills.ts
-import { watchFills } from '@blazephoenix/sdk';
+// Stream every BlazePhoenix fill on Base, read from YOUR node.
+// BASE_RPC_URL=https://your-base-node npx tsx examples/watch-fills.ts
+import { BlazePhoenix } from '@blazephoenix/sdk';
 
-const unwatch = await watchFills({
+const blaze = new BlazePhoenix({ rpc: { base: process.env.BASE_RPC_URL! } });
+
+const unwatch = await blaze.watchFills({
   chain: 'base',
-  rpcUrl: process.env.RPC_URL, // optional since v0.4.0 — public endpoints by default
   onFill: (f) => {
-    console.log(
-      `${f.txHash} — ${f.user} swapped ${f.amountIn} (${f.tokenIn}) → ${f.amountOut} (${f.tokenOut}) via ${f.legs} legs`,
-    );
+    const proof = f.proof ? ` · quoted ${f.proof.quoted} realised ${f.proof.realized} floor ${f.proof.floorUsed}` : '';
+    console.log(`${f.txHash} — ${f.user} swapped ${f.amountIn} (${f.tokenIn}) → ${f.amountOut} (${f.tokenOut}) via ${f.legs} legs${proof}`);
   },
 });
 

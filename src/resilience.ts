@@ -76,13 +76,20 @@ export async function resilientFetch(
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res: Response | undefined;
+    // An explicit controller + ref'd timer rather than AbortSignal.timeout():
+    // the latter's timer is unref'd in Node (a hung request with nothing else
+    // pending would never time out) and is missing from older browsers.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      res = await fetchFn(url, { ...init, signal: ctrl.signal });
       if (!isTransient(res)) return res;
       if (attempt === retries) return res;
     } catch (e) {
       lastErr = e;
       if (attempt === retries) throw e;
+    } finally {
+      clearTimeout(timer);
     }
     await sleep(retryDelayMs(res, attempt, backoffMs));
   }
