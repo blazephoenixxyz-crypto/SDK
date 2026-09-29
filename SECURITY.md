@@ -26,7 +26,7 @@ and the reporting window.
 
 - Third-party code: pools, tokens, bridges, wallets, RPC providers, Cloudflare, GitHub, unless our code consumes them unsafely.
 - Limits the whitepaper already states and bounds (for example the ≈2.7 % sandwich cap on a 1 %-of-depth trade, or quote staleness under your signed minimum), unless you beat the stated bound.
-- Anything already in `/security/advisories` or a Hall of Fame register. Duplicates go to the first report by timestamp.
+- Anything already in `/security/advisories` or a Hall of Fame register: a finding that is already fixed and published.
 - Price movement, MEV and front-running that settle at or above the minimum the user signed.
 - Attacks that need a compromised private key, admin key, or the victim's own device.
 - Volumetric DoS, load testing, spam, and rate-limit exhaustion of the free public API.
@@ -55,7 +55,8 @@ and the reporting window.
 
 ## Awards, safe harbour and recognition
 
-Awards, the safe-harbour terms and the recognition policy are in
+Awards, the duplicate-report rule, the safe-harbour terms and the recognition policy
+are in
 [Blaze-Phoenix-Dex `SECURITY.md`](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex/blob/main/SECURITY.md).
 The reporting window is on the campaign page,
 [blazephoenix.xyz/bounty](https://blazephoenix.xyz/bounty). If you are unsure
