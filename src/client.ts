@@ -35,7 +35,7 @@ import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
 } from './registry.js';
 import { memGet, memPut, singleflight } from './resilience.js';
-import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions } from './rpc.js';
+import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions, scrubUrls } from './rpc.js';
 import type {
   Address, ApprovalStep, ExactQuote, Fill, Hex, Preview, Quote, QuoteRequest, Route,
   SimulationResult, SolvencyReport, SwapPlan, SwapRequest, TokenInfo, TxRequest,
@@ -393,7 +393,7 @@ export class BlazePhoenix {
   async quoteBatch(reqs: QuoteRequest[]): Promise<BatchItem[]> {
     const fail = (e: unknown): BatchItem => ({
       ok: false,
-      error: { code: e instanceof BlazeError ? e.code : 'error', message: (e as Error)?.message ?? String(e) },
+      error: { code: e instanceof BlazeError ? e.code : 'error', message: scrubUrls((e as Error)?.message ?? String(e)) },
     });
     const out: BatchItem[] = new Array(reqs.length);
     type Prepared = { i: number; ctx: Ctx; tIn: ResolvedToken; tOut: ResolvedToken; amountIn: bigint; userMinOut: bigint };

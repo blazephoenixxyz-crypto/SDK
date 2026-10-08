@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1 — an RPC error never carries your key
+
+- An `rpc_error` quotes what your node answered with every URL in it reduced to its
+  host (`scrubUrls`, built on `redact`), so a key-in-path endpoint (`…/v2/KEY`) stays out
+  of every log, transcript and tool output that prints the error. `quoteBatch` failures
+  pass through the same scrub.
+- Credited to the researchers who reported it through the bug bounty.
+
 ## 1.0.0 — 100% your RPC
 
 **Breaking.** The SDK no longer talks to `blazephoenix.xyz/api/quote` and ships no RPC
