@@ -79,6 +79,12 @@ export function redact(url: string): string {
   }
 }
 
+/** Every URL inside a message, redacted. A transport's error text quotes the URL it called,
+ *  key and all, so a message is scrubbed before it leaves the router. */
+export function scrubUrls(text: string): string {
+  return text.replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi, (m) => redact(m));
+}
+
 export function transportFrom(src: RpcSource, opts: TransportOptions = {}): Transport {
   const o: Required<TransportOptions> = {
     timeoutMs: opts.timeoutMs ?? 10_000,
@@ -178,7 +184,7 @@ export class RpcRouter {
       const c = this.clientOf(s);
       s.verified = c.getChainId().catch((e: unknown) => {
         s.verified = undefined; // a transient failure must not poison the slot forever
-        throw new BlazeError('rpc_error', `your RPC did not answer eth_chainId: ${(e as Error)?.message ?? e}`, { cause: e });
+        throw new BlazeError('rpc_error', `your RPC did not answer eth_chainId: ${scrubUrls(String((e as Error)?.message ?? e))}`, { cause: e });
       });
     }
     return s.verified;

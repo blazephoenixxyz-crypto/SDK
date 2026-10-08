@@ -14,7 +14,7 @@ import {
 } from '../src/constants.js';
 import { EMBEDDED_DEPLOYMENTS, featuresOf, matchesSelector } from '../src/deployments.js';
 import { Registry } from '../src/registry.js';
-import { RpcRouter, isAllowedRpcUrl, redact, rpcFromEnv } from '../src/rpc.js';
+import { RpcRouter, isAllowedRpcUrl, redact, rpcFromEnv, scrubUrls } from '../src/rpc.js';
 import {
   decodeSwapExactIn, encodeSwapExactIn, minOutFor, tightenMinOut, verifySwapExactIn,
 } from '../src/calldata.js';
@@ -105,6 +105,20 @@ check('http refused (remote)', !isAllowedRpcUrl('http://node.example.com'));
 check('http localhost allowed (your anvil)', isAllowedRpcUrl('http://127.0.0.1:8545'));
 check('javascript: refused', !isAllowedRpcUrl('javascript:alert(1)'));
 eq('redact hides the key path', redact('https://base-mainnet.example.com/v2/SECRETKEY'), 'https://base-mainnet.example.com/…');
+eq('scrubUrls hides every URL inside a sentence',
+  scrubUrls('HTTP request failed.\n\nStatus: 401\nURL: http://127.0.0.1:46071/v2/sk-SECRET\nRequest body: {"method":"eth_chainId"}'),
+  'HTTP request failed.\n\nStatus: 401\nURL: http://127.0.0.1:46071/…\nRequest body: {"method":"eth_chainId"}');
+{
+  // A node that fails the way an HTTP transport does: its error text quotes the URL it called.
+  const leaky = { request: async () => { throw new Error('HTTP request failed.\n\nStatus: 401\nURL: https://base-mainnet.example.com/v2/SECRETKEY\nRequest body: {}'); } };
+  try {
+    await new RpcRouter({ base: leaky as never }, { retries: 0 }).client('base');
+    check('a failing RPC is reported as rpc_error', false, 'did not throw');
+  } catch (e) {
+    check('a failing RPC is reported as rpc_error', e instanceof BlazeError && e.code === 'rpc_error', (e as Error)?.message);
+    check('an rpc_error never carries the key from the RPC URL', !String((e as Error)?.message).includes('SECRETKEY'), (e as Error)?.message);
+  }
+}
 {
   const env = { BLAZEPHOENIX_RPC_BASE: 'https://a.example.com, https://b.example.com', BLAZEPHOENIX_RPC_1: 'https://c.example.com' };
   eq('rpcFromEnv per-chain + comma fallback', rpcFromEnv(env), { '1': 'https://c.example.com', '8453': ['https://a.example.com', 'https://b.example.com'] });
