@@ -64,7 +64,7 @@ new BlazePhoenix();   // reads BLAZEPHOENIX_RPC_BASE / _ETHEREUM / _OPTIMISM / _
 - A chain without a configured node throws `rpc_required` — nothing silently falls back
   to someone else's infrastructure.
 - `https://` and `wss://` only (`http://` allowed for `localhost` — your anvil/geth).
-  URLs are redacted in every error message, because keys live in them.
+  URLs are redacted in every error message and in its `cause` chain, because keys live in them.
 
 ## Versions — pick yours
 
@@ -147,7 +147,7 @@ guesses a token from a ticker.
 
 ## Errors
 
-Every failure is a `BlazeError` with a stable `code`; protocol reverts carry `revert`
+Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; protocol reverts carry `revert`
 (`RouterE` / `QuoterE` / `SolverE` / `HubE` + the reason from the contract's own source):
 
 | code | meaning |
@@ -166,6 +166,8 @@ Every failure is a `BlazeError` with a stable `code`; protocol reverts carry `re
 
 [`@blazephoenix/mcp`](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) wraps this SDK as
 a local MCP server — the agent's tools run on your machine, on your RPC.
+
+For agents, [`llms.txt`](llms.txt) describes this package in the [llmstxt.org](https://llmstxt.org) format.
 
 ## Examples
 

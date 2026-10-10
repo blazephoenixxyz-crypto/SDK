@@ -18,7 +18,9 @@
     "byo-rpc",
     "self-hosted",
     "on-chain-quoter",
-    "mcp"
+    "mcp",
+    "robinhood-chain",
+    "llms-txt"
   ],
   "license": "MIT",
   "repository": {
@@ -41,7 +43,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "llms.txt"
   ],
   "sideEffects": false,
   "engines": {

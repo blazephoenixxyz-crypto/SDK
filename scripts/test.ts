@@ -117,6 +117,9 @@ eq('scrubUrls hides every URL inside a sentence',
   } catch (e) {
     check('a failing RPC is reported as rpc_error', e instanceof BlazeError && e.code === 'rpc_error', (e as Error)?.message);
     check('an rpc_error never carries the key from the RPC URL', !String((e as Error)?.message).includes('SECRETKEY'), (e as Error)?.message);
+    const chain: string[] = [];
+    for (let c: unknown = e; c; c = (c as { cause?: unknown }).cause) chain.push(String((c as Error)?.message ?? c), JSON.stringify(c, Object.getOwnPropertyNames(c as object)) ?? '');
+    check('the cause chain of an rpc_error never carries the key either', !chain.join('\n').includes('SECRETKEY'));
   }
 }
 {
@@ -553,6 +556,28 @@ console.log('client · remote registry verification');
   const { provider: wired } = mockProvider({ quoter: V2.quoter as Address, router: V2.router as Address, version: '2.0.0', hub: '0x00000000000000000000000000000000000000ee' });
   await throwsCode('registry entry wired to another Hub → refused',
     () => new BlazePhoenix({ rpc: wired, registry: { mode: 'auto', fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
+  {
+    const Z = '0x0000000000000000000000000000000000000000';
+    const unwired = { ...V2, hub: Z, solver: Z };
+    const fz = (async () => new Response(JSON.stringify({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 8453: unwired } }] }), { status: 200 })) as unknown as typeof fetch;
+    await throwsCode('remote 2.x entry with a zero Hub/Solver cannot skip the wiring checks → refused',
+      () => new BlazePhoenix({ rpc: good, registry: { mode: 'auto', fetchFn: fz } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
+  }
+  {
+    const leakyCall = { request: async ({ method }: { method: string }) => {
+      if (method === 'eth_chainId') return '0x2105';
+      if (method === 'eth_blockNumber') return '0x10';
+      throw new Error('HTTP request failed.\n\nURL: https://base-mainnet.example.com/v2/SECRETKEY');
+    } };
+    try {
+      await new BlazePhoenix({ rpc: { base: leakyCall as never } }).solvency();
+      check('solvency(): a failing read never carries the key from the RPC URL', false, 'did not throw');
+    } catch (e) {
+      const chain: string[] = [];
+      for (let c: unknown = e; c; c = (c as { cause?: unknown }).cause) chain.push(String((c as Error)?.message ?? c), JSON.stringify(c, Object.getOwnPropertyNames(c as object)) ?? '');
+      check('solvency(): a failing read never carries the key from the RPC URL', !chain.join('\n').includes('SECRETKEY'), String((e as Error)?.message));
+    }
+  }
   const v1still = await new BlazePhoenix({ rpc: good, version: '1', registry: { mode: 'auto', fetchFn } }).resolveDeployment({ chain: 'base' });
   eq('version pin "1" keeps the 1.x contracts', [v1still.version, v1still.contracts.router], ['1.0.0', V1.router]);
 }

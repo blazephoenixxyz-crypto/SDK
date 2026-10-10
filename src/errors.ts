@@ -7,6 +7,18 @@
 import { decodeErrorResult } from 'viem';
 import { BLAZE_ERRORS_ABI } from './abis.generated.js';
 import type { DecodedError, Hex } from './types.js';
+import { scrubUrls } from './rpc.js';
+
+/** A copy of an error chain that keeps names and messages but no URL in any of them:
+ *  transport errors quote the URL they called (key and all) in message, details and url fields. */
+function scrubCause(c: unknown, depth = 0): unknown {
+  if (c === undefined || c === null || depth > 8) return undefined;
+  if (!(c instanceof Error)) return scrubUrls(String(c));
+  const inner = scrubCause((c as { cause?: unknown }).cause, depth + 1);
+  const out = new Error(scrubUrls(c.message), inner !== undefined ? { cause: inner } : undefined);
+  out.name = c.name;
+  return out;
+}
 
 export type BlazeErrorCode =
   | 'rpc_required'
@@ -27,7 +39,7 @@ export class BlazeError extends Error {
   readonly details?: Record<string, unknown>;
   readonly revert?: DecodedError;
   constructor(code: BlazeErrorCode, message: string, opts: { details?: Record<string, unknown>; revert?: DecodedError; cause?: unknown } = {}) {
-    super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
+    super(message, opts.cause !== undefined ? { cause: scrubCause(opts.cause) } : undefined);
     this.name = 'BlazeError';
     this.code = code;
     this.details = opts.details;

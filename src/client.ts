@@ -194,6 +194,9 @@ export class BlazePhoenix {
       checks.push({ name: `code:${k}`, ok: !!code && code !== '0x', detail: code && code !== '0x' ? `${(code.length - 2) / 2} bytes` : 'no code at address' });
     });
     if (featuresOf(dep.version).introspection) {
+      // 2.x is verified through its Hub/Solver wiring: an entry without them would skip those checks.
+      if (isZero(c.hub)) checks.push({ name: 'hub', ok: false, detail: 'zero address' });
+      if (isZero(c.solver)) checks.push({ name: 'solver', ok: false, detail: 'zero address' });
       const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
       const read = async <T>(fn: () => Promise<T>): Promise<T | undefined> => { try { return await fn(); } catch { return undefined; } };
       const [qv, rv, sv, qh, qs, rh, rs, sh] = await Promise.all([
@@ -664,11 +667,16 @@ export class BlazePhoenix {
     const staking = CHAINS[chainId].staking;
     if (!staking) throw new BlazeError('not_deployed', `no BlazePhoenix staking engine on ${CHAINS[chainId].name}`);
     const client = await this.rpc.client(chainId);
-    const blockNumber = await client.getBlockNumber();
-    const [r, isSolvent] = await Promise.all([
-      client.readContract({ address: staking, abi: STAKING_SOLVENCY_ABI, functionName: 'solvency', blockNumber }),
-      client.readContract({ address: staking, abi: STAKING_SOLVENCY_ABI, functionName: 'isSolvent', blockNumber }),
-    ]);
+    let blockNumber: bigint, r: unknown, isSolvent: boolean;
+    try {
+      blockNumber = await client.getBlockNumber();
+      [r, isSolvent] = await Promise.all([
+        client.readContract({ address: staking, abi: STAKING_SOLVENCY_ABI, functionName: 'solvency', blockNumber }),
+        client.readContract({ address: staking, abi: STAKING_SOLVENCY_ABI, functionName: 'isSolvent', blockNumber }),
+      ]);
+    } catch (e) {
+      throw new BlazeError('rpc_error', `solvency read failed on your RPC: ${scrubUrls(String((e as Error)?.message ?? e))}`, { cause: e });
+    }
     const s = r as unknown as Omit<SolvencyReport, 'chainId' | 'staking' | 'isSolvent' | 'blockNumber'> & { solvent: boolean };
     return {
       chainId, staking, isSolvent,
