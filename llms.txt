@@ -1,0 +1,49 @@
+# BlazePhoenix SDK
+
+> `@blazephoenix/sdk` is the official TypeScript SDK (MIT) for BlazePhoenix, the on-chain DEX aggregator on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain. It quotes, builds, verifies and executes swaps with every read made as an `eth_call` from your process to the RPC node you configure, against the same Quoter contract that settles the swap.
+
+The SDK is free and needs no API key and no signup. You bring the RPC node: the package ships no RPC endpoints (a test enforces it), and a chain without a configured node throws `rpc_required` instead of falling back to someone else's infrastructure. Each node's `eth_chainId` is checked once (`rpc_chain_mismatch`). URLs are reduced to their host in every error and in its `cause` chain, because keys live in them. The SDK never asks for, stores or touches a private key: `execute` takes a viem `WalletClient` you control.
+
+The only request to blazephoenix.xyz is the deployment registry (`GET /api/deployments`), which tells the SDK about new protocol versions. Pinned addresses cannot be moved remotely, every remote-sourced set is verified on your RPC before first use, and `registry: { mode: 'embedded' }` turns the fetch off.
+
+Install:
+
+```bash
+npm i @blazephoenix/sdk viem
+```
+
+Configure the RPC in code or from the environment:
+
+```ts
+import { BlazePhoenix } from '@blazephoenix/sdk';
+const blaze = new BlazePhoenix({ rpc: { base: process.env.BASE_RPC_URL } });
+const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5' });
+```
+
+`rpc` accepts a URL, a fallback list, an EIP-1193 provider, a viem Transport or a per-chain map. With no `rpc`, the client reads `BLAZEPHOENIX_RPC_URL` (one node) or `BLAZEPHOENIX_RPC_BASE`, `_ETHEREUM`, `_OPTIMISM`, `_ARBITRUM`, `_ROBINHOOD` (comma-separated for fallback).
+
+Main methods: `quote`, `quoteExact`, `quoteBatch`, `buildSwap` (verified Router calldata), `simulate`, `execute`, `getFills`, `watchFills`, `tokenInfo`, `solvency`, `deployments`. Every failure is a `BlazeError` with a stable `code`.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/README.md): quote, build and execute; RPC options; protocol versions; errors
+- [Changelog](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/CHANGELOG.md): what changed in each release
+- [Security policy](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/SECURITY.md): scope and how to report a vulnerability
+
+## Examples
+
+- [quote.ts](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/examples/quote.ts): a single quote on your node
+- [watch-fills.ts](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/examples/watch-fills.ts): follow `Swap` events live
+- [phoenix-bot.ts](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/examples/phoenix-bot.ts): a zero-custody Telegram bot on your own nodes
+
+## Related
+
+- [BlazePhoenix MCP llms.txt](https://raw.githubusercontent.com/blazephoenixxyz-crypto/blazephoenix-mcp/main/llms.txt): this SDK as a local MCP server for AI agents
+- [BlazePhoenix API llms.txt](https://raw.githubusercontent.com/blazephoenixxyz-crypto/Blaze-Phoenix-API/main/llms.txt): the keyless HTTP API that prepares the `eth_call` for your node and decodes the answer
+- [BlazePhoenix Dex llms.txt](https://raw.githubusercontent.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex/main/llms.txt): the contracts, their design and their verification ([repository](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex))
+
+## Optional
+
+- [npm package](https://www.npmjs.com/package/@blazephoenix/sdk): published versions
+- [telegram-bot.ts](https://raw.githubusercontent.com/blazephoenixxyz-crypto/SDK/main/examples/telegram-bot.ts): a minimal Telegram quote bot
+- [Site llms.txt](https://blazephoenix.xyz/llms.txt): the integration guide for the whole project

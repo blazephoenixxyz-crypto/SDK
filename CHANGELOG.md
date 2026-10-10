@@ -6,6 +6,12 @@
   host (`scrubUrls`, built on `redact`), so a key-in-path endpoint (`…/v2/KEY`) stays out
   of every log, transcript and tool output that prints the error. `quoteBatch` failures
   pass through the same scrub.
+- The `cause` chain of every `BlazeError` is a scrubbed copy (name and message, URLs reduced
+  to their host), so code that logs `error.cause` cannot print the key either.
+- `solvency()` fails with a `BlazeError` (`rpc_error`, scrubbed) instead of the raw viem error.
+- A remote-sourced 2.x deployment with a zero Hub or Solver address fails verification
+  (`deployment_unverified`) instead of skipping the wiring checks.
+- `llms.txt` describes the package for agents ([llmstxt.org](https://llmstxt.org) format).
 - Credited to the researchers who reported it through the bug bounty.
 
 ## 1.0.0 — 100% your RPC
