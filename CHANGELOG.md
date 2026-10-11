@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — only pinned addresses are routed to by default
+
+- `registry.remoteVersions` (default `false`): a version that only the fetched registry
+  document supplies is listed, but `resolve()`, quotes and `buildSwap` use only Router and
+  Quoter addresses pinned in this package. The on-chain check of a remote entry reads the
+  entry's own contracts, so it cannot tell a real deployment from a look-alike; a new
+  deployment now arrives with an SDK release. Set `remoteVersions: true` to opt in after
+  checking the addresses yourself (verification on your RPC still runs).
+- `USDG` resolves only on Robinhood Chain and `USDC` only elsewhere. Before, `USDG` on
+  Ethereum, Base, Optimism or Arbitrum encoded the chain's USDC, a different token.
+- `execute()` checks the plan's age again after the approval confirms. A plan that went
+  older than `maxQuoteAgeMs` while waiting is rebuilt from `request`, or the swap is not
+  sent (`bad_request`) when there is no `request`.
+- Credited to the researchers who reported it through the bug bounty.
+
 ## 1.0.1 — an RPC error never carries your key
 
 - An `rpc_error` quotes what your node answered with every URL in it reduced to its

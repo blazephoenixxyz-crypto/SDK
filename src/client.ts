@@ -241,14 +241,18 @@ export class BlazePhoenix {
     switch (s.toUpperCase()) {
       case 'ETH': return { address: c.weth, native: true };
       case 'WETH': return { address: c.weth, native: false };
-      case 'USDC': case 'USDG': return { address: c.usdc, native: false };
+      // `usdc` holds each chain's one dollar asset: USDG on Robinhood Chain, USDC
+      // elsewhere. The other symbol names a different token there, so it is refused.
+      case 'USDC': case 'USDG':
+        if (s.toUpperCase() === (chainId === 4663 ? 'USDG' : 'USDC')) return { address: c.usdc, native: false };
+        break;
       case 'BZPX':
         if (c.bzpx) return { address: c.bzpx, native: false };
         break;
       default: break;
     }
     throw new BlazeError('bad_request',
-      `${side}: "${ref}" is not a 0x address or a built-in symbol (ETH, WETH, USDC, BZPX) on ${c.name} — pass the token address`);
+      `${side}: "${ref}" is not a 0x address or a built-in symbol (ETH, WETH, ${chainId === 4663 ? 'USDG' : 'USDC'}, BZPX) on ${c.name} — pass the token address`);
   }
 
   private async decimalsOf(client: PublicClient, chainId: number, t: ResolvedToken): Promise<number> {
@@ -619,6 +623,14 @@ export class BlazePhoenix {
         if (r.status !== 'success') throw new BlazeError('reverted', `approval transaction reverted (${approvalHash})`);
       }
       plan = { ...plan, approval: { ...plan.approval, current: plan.approval.amount } };
+      // Waiting for the approval can outlast maxQuoteAgeMs: check the age again.
+      if (Date.now() - plan.quote.quotedAt > maxAge) {
+        if (!req) {
+          throw new BlazeError('bad_request', `plan went older than ${maxAge}ms while the approval confirmed`
+            + `${approvalHash ? ` (${approvalHash})` : ''} — the swap was NOT sent; rebuild the plan, or pass \`request\` so it can be rebuilt`);
+        }
+        plan = await this.buildSwap({ ...req, from: req.from ?? account.address });
+      }
     }
     if (opts.simulate ?? true) {
       const sim = await this.simulate(plan, account.address);

@@ -4,7 +4,7 @@
 
 The SDK is free and needs no API key and no signup. You bring the RPC node: the package ships no RPC endpoints (a test enforces it), and a chain without a configured node throws `rpc_required` instead of falling back to someone else's infrastructure. Each node's `eth_chainId` is checked once (`rpc_chain_mismatch`). URLs are reduced to their host in every error and in its `cause` chain, because keys live in them. The SDK never asks for, stores or touches a private key: `execute` takes a viem `WalletClient` you control.
 
-The only request to blazephoenix.xyz is the deployment registry (`GET /api/deployments`), which tells the SDK about new protocol versions. Pinned addresses cannot be moved remotely, every remote-sourced set is verified on your RPC before first use, and `registry: { mode: 'embedded' }` turns the fetch off.
+The only request to blazephoenix.xyz is the deployment registry (`GET /api/deployments`), which tells the SDK about new protocol versions. Pinned addresses cannot be moved remotely, and by default only pinned Router and Quoter addresses are routed to; remote-only versions need `registry: { remoteVersions: true }` and are then verified on your RPC before first use; `registry: { mode: 'embedded' }` turns the fetch off.
 
 Install:
 
