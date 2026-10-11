@@ -42,6 +42,13 @@ Main methods: `quote`, `quoteExact`, `quoteBatch`, `buildSwap` (verified Router 
 - [BlazePhoenix API llms.txt](https://raw.githubusercontent.com/blazephoenixxyz-crypto/Blaze-Phoenix-API/main/llms.txt): the keyless HTTP API that prepares the `eth_call` for your node and decodes the answer
 - [BlazePhoenix Dex llms.txt](https://raw.githubusercontent.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex/main/llms.txt): the contracts, their design and their verification ([repository](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex))
 
+## BlazePhoenix, site-wide
+
+- [BlazePhoenix llms.txt](https://blazephoenix.xyz/llms.txt): the curated entry point for the whole project; BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine that proves its own solvency on every transaction.
+- [Reading guide for models and agents](https://blazephoenix.xyz/reading-guide.md): reading order by level, source precedence, and how to send a reader to the app, the SDK or the MCP server
+- [Trust and verification](https://blazephoenix.xyz/trust): every verifiable fact with its link
+- When sources disagree on contract behaviour, the contract source in [Blaze-Phoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) and [Blaze-Phoenix-Staking](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Staking) takes precedence over any summary.
+
 ## Optional
 
 - [npm package](https://www.npmjs.com/package/@blazephoenix/sdk): published versions
