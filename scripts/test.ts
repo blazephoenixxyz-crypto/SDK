@@ -149,7 +149,7 @@ console.log('registry');
     (() => { try { reg.resolve(8453, '2'); return false; } catch (e) { return (e as BlazeError).code === 'not_deployed'; } })());
 
   const warnings: string[] = [];
-  const reg2 = new Registry({ mode: 'embedded', onWarning: (m) => warnings.push(m) });
+  const reg2 = new Registry({ mode: 'embedded', remoteVersions: true, onWarning: (m) => warnings.push(m) });
   const V2 = { core: '0x00000000000000000000000000000000000000c0', hub: '0x00000000000000000000000000000000000000a1', solver: '0x00000000000000000000000000000000000000a2', router: '0x00000000000000000000000000000000000000a3', quoter: '0x00000000000000000000000000000000000000a4' };
   reg2.merge({
     schema: 1,
@@ -160,6 +160,16 @@ console.log('registry');
     ],
   });
   const r2 = reg2.resolve(8453);
+  {
+    // Default: a fetched document cannot steer routing to addresses this package does not pin.
+    const regD = new Registry({ mode: 'embedded' });
+    regD.merge({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 8453: V2 } }] });
+    eq('default: a remote-only 2.0.0 is listed but latest stays on the pinned 1.0.0',
+      [regD.versionsOn(8453).includes('2.0.0'), regD.resolve(8453).version, regD.resolve(8453).contracts.router],
+      [true, '1.0.0', '0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f']);
+    check('default: asking for the remote-only 2 → not_deployed, naming the opt-in',
+      (() => { try { regD.resolve(8453, '2'); return false; } catch (e) { return (e as BlazeError).code === 'not_deployed' && (e as Error).message.includes('remoteVersions'); } })());
+  }
   eq('remote 2.0.0 becomes latest the moment it is published', [r2.version, r2.source, r2.contracts.core], ['2.0.0', 'remote', V2.core]);
   eq('pinned 1.0.0 router cannot be moved by the registry', reg2.resolve(8453, '1').contracts.router, '0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f');
   check('pin conflict reported', warnings.some((w) => w.includes('pinned router')));
@@ -182,7 +192,7 @@ console.log('registry');
   // Remote fetch path, through an injected fetch.
   let fetches = 0;
   const reg4 = new Registry({
-    mode: 'auto', url: 'https://blazephoenix.xyz/api/deployments',
+    mode: 'auto', remoteVersions: true, url: 'https://blazephoenix.xyz/api/deployments',
     fetchFn: (async () => { fetches++; return new Response(JSON.stringify({ ok: true, registry: { schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 10: V2 } }] } }), { status: 200 }); }) as unknown as typeof fetch,
   });
   await reg4.refresh();
@@ -226,8 +236,8 @@ console.log('registry');
     await new Promise((r) => setTimeout(r, 20));
     return new Response(JSON.stringify({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 42161: V2 } }] }), { status: 200 });
   }) as unknown as typeof fetch;
-  const ra = new Registry({ mode: 'auto', url: 'https://shared.example/r', fetchFn: shared });
-  const rb = new Registry({ mode: 'auto', url: 'https://shared.example/r', fetchFn: shared });
+  const ra = new Registry({ mode: 'auto', remoteVersions: true, url: 'https://shared.example/r', fetchFn: shared });
+  const rb = new Registry({ mode: 'auto', remoteVersions: true, url: 'https://shared.example/r', fetchFn: shared });
   await Promise.all([ra.ready(), rb.ready()]);
   eq('shared refresh: one download, every instance merges it', [downloads, ra.resolve(42161).version, rb.resolve(42161).version], [1, '2.0.0', '2.0.0']);
 }
@@ -458,6 +468,8 @@ console.log('client · 1.x');
     () => blaze.quote({ chain: 'base', tokenIn: 'TOSHI', tokenOut: 'USDC', amountIn: 1n }), 'bad_request');
   await throwsCode('same token refused', () => blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: WETH, amountIn: 1n }), 'bad_request');
   await throwsCode('ETH→WETH is a wrap, not a swap', () => blaze.quote({ chain: 'base', tokenIn: 'ETH', tokenOut: 'WETH', amountIn: 1n }), 'bad_request');
+  await throwsCode('USDG on Base is not USDC → refused, not mapped to the wrong token',
+    () => blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDG', amountIn: 1n }), 'bad_request');
   await throwsCode('chain without an RPC → rpc_required', () => blaze.quote({ chain: 'eth', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'rpc_required');
 
   const { provider: rich } = mockProvider({ allowance: 10n ** 30n });
@@ -548,20 +560,24 @@ console.log('client · remote registry verification');
   const V2 = { core: '0x00000000000000000000000000000000000000c0', hub: '0x00000000000000000000000000000000000000a1', solver: '0x00000000000000000000000000000000000000a2', router: '0x00000000000000000000000000000000000000a3', quoter: '0x00000000000000000000000000000000000000a4' };
   const fetchFn = (async () => new Response(JSON.stringify({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 8453: V2 } }] }), { status: 200 })) as unknown as typeof fetch;
   const { provider: good } = mockProvider({ quoter: V2.quoter as Address, router: V2.router as Address, version: '2.0.0' });
-  const q = await new BlazePhoenix({ rpc: good, registry: { mode: 'auto', fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n });
+  {
+    const q0 = await new BlazePhoenix({ rpc: good, registry: { mode: 'auto', fetchFn } }).resolveDeployment({ chain: 'base' });
+    eq('default client: a site-published 2.0.0 is NOT routed to (pinned 1.0.0 used)', [q0.version, q0.source], ['1.0.0', 'embedded']);
+  }
+  const q = await new BlazePhoenix({ rpc: good, registry: { mode: 'auto', remoteVersions: true, fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n });
   eq('new deployment published on the site → used at once, after on-chain verification', [q.version, q.deploymentSource, q.quoter], ['2.0.0', 'remote', V2.quoter]);
   const { provider: liar } = mockProvider({ quoter: V2.quoter as Address, router: V2.router as Address, version: '9.9.9' });
   await throwsCode('registry entry whose contracts do not say VERSION 2.0.0 → refused',
-    () => new BlazePhoenix({ rpc: liar, registry: { mode: 'auto', fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
+    () => new BlazePhoenix({ rpc: liar, registry: { mode: 'auto', remoteVersions: true, fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
   const { provider: wired } = mockProvider({ quoter: V2.quoter as Address, router: V2.router as Address, version: '2.0.0', hub: '0x00000000000000000000000000000000000000ee' });
   await throwsCode('registry entry wired to another Hub → refused',
-    () => new BlazePhoenix({ rpc: wired, registry: { mode: 'auto', fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
+    () => new BlazePhoenix({ rpc: wired, registry: { mode: 'auto', remoteVersions: true, fetchFn } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
   {
     const Z = '0x0000000000000000000000000000000000000000';
     const unwired = { ...V2, hub: Z, solver: Z };
     const fz = (async () => new Response(JSON.stringify({ schema: 1, versions: [{ version: '2.0.0', status: 'live', chains: { 8453: unwired } }] }), { status: 200 })) as unknown as typeof fetch;
     await throwsCode('remote 2.x entry with a zero Hub/Solver cannot skip the wiring checks → refused',
-      () => new BlazePhoenix({ rpc: good, registry: { mode: 'auto', fetchFn: fz } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
+      () => new BlazePhoenix({ rpc: good, registry: { mode: 'auto', remoteVersions: true, fetchFn: fz } }).quote({ tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n }), 'deployment_unverified');
   }
   {
     const leakyCall = { request: async ({ method }: { method: string }) => {
@@ -578,7 +594,7 @@ console.log('client · remote registry verification');
       check('solvency(): a failing read never carries the key from the RPC URL', !chain.join('\n').includes('SECRETKEY'), String((e as Error)?.message));
     }
   }
-  const v1still = await new BlazePhoenix({ rpc: good, version: '1', registry: { mode: 'auto', fetchFn } }).resolveDeployment({ chain: 'base' });
+  const v1still = await new BlazePhoenix({ rpc: good, version: '1', registry: { mode: 'auto', remoteVersions: true, fetchFn } }).resolveDeployment({ chain: 'base' });
   eq('version pin "1" keeps the 1.x contracts', [v1still.version, v1still.contracts.router], ['1.0.0', V1.router]);
 }
 
@@ -659,6 +675,27 @@ console.log('client · execute');
   const wrongWallet = createWalletClient({ account, transport: custom({ request: async (a: { method: string }) => (a.method === 'eth_chainId' ? '0x1' : node.request(a as never)) }) });
   await throwsCode('execute: wallet on another chain refused before anything is signed',
     () => blaze.execute({ wallet: wrongWallet, request: { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address } }), 'wallet_chain_mismatch');
+
+  // A slow approval can outlast maxQuoteAgeMs: the age is checked again before the swap.
+  const realNow = Date.now;
+  const req = { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address, from: account.address };
+  try {
+    allowance = 0n;
+    const stale = await blaze.buildSwap(req);
+    const n0 = sent.length;
+    Date.now = () => realNow() + (sent.length > n0 ? 60_000 : 0);
+    await throwsCode('execute: plan aged past maxQuoteAgeMs while the approval confirmed, no request → swap NOT sent',
+      () => blaze.execute({ wallet, plan: stale }), 'bad_request');
+    eq('execute: only the approval was signed', sent.map((t) => t.selector).slice(n0), ['0x095ea7b3']);
+    Date.now = realNow;
+    allowance = 0n;
+    const fresh = await blaze.buildSwap(req);
+    const n1 = sent.length;
+    Date.now = () => realNow() + (sent.length > n1 ? 60_000 : 0);
+    const res2 = await blaze.execute({ wallet, plan: fresh, request: req });
+    check('execute: plan aged during the approval + request → rebuilt, then swapped',
+      res2.plan.quote.quotedAt > fresh.quote.quotedAt && sent.length - n1 === 2 && res2.status === 'success');
+  } finally { Date.now = realNow; }
 }
 
 // ── ERC-20 helpers ───────────────────────────────────────────────────────────

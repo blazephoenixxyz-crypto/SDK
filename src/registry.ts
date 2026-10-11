@@ -54,6 +54,12 @@ export interface RegistryOptions {
    *  delay a call, and by at most this much; later refreshes run in the
    *  background (stale-while-revalidate). */
   timeoutMs?: number;
+  /** Route to addresses that only the fetched document supplies (a version
+   *  released after this SDK). Default false: the document can list them, but
+   *  resolve() only returns Router/Quoter addresses pinned in this package —
+   *  the on-chain check of a remote entry reads the entry's own contracts, so
+   *  it cannot tell a real deployment from a look-alike. */
+  remoteVersions?: boolean;
   /** Called for every pin conflict or rejected document — never silently. */
   onWarning?: (msg: string) => void;
 }
@@ -66,6 +72,7 @@ export class Registry {
   private fetchedAt = 0;
   private lastError?: string;
   private readonly mode: 'auto' | 'embedded';
+  private readonly remoteVersions: boolean;
   private readonly url: string;
   private readonly ttlMs: number;
   private readonly fetchFn?: typeof fetch;
@@ -75,6 +82,7 @@ export class Registry {
 
   constructor(opts: RegistryOptions = {}, overrides?: ContractOverrides) {
     this.mode = opts.mode ?? 'auto';
+    this.remoteVersions = opts.remoteVersions ?? false;
     this.url = opts.url ?? DEPLOYMENTS_URL;
     this.ttlMs = opts.ttlMs ?? 10 * 60_000;
     this.fetchFn = opts.fetchFn ?? (globalThis.fetch as typeof fetch | undefined);
@@ -225,6 +233,7 @@ export class Registry {
 
     const candidates = this.doc.versions
       .filter((v) => matchesSelector(v.version, sel) && isDeployed(v.chains[chainId]))
+      .filter((v) => this.remoteVersions || this.isPinned(v.version, chainId))
       .sort((a, b) => compareVersions(b.version, a.version));
     const pick = candidates[0];
 
@@ -250,15 +259,24 @@ export class Registry {
 
     if (!pick) {
       const deployed = this.versionsOn(chainId);
+      const remoteOnly = this.remoteVersions ? [] : deployed.filter((v) => matchesSelector(v, sel) && !this.isPinned(v, chainId));
       throw new BlazeError('not_deployed',
         `no BlazePhoenix deployment matching version "${selector}" on chain ${chainId}`
-        + (deployed.length ? ` (deployed: ${deployed.join(', ')})` : ''),
+        + (deployed.length ? ` (deployed: ${deployed.join(', ')})` : '')
+        + (remoteOnly.length ? ` — ${remoteOnly.join(', ')} is known only from the fetched registry; `
+          + 'update the SDK, or set registry.remoteVersions after checking the addresses yourself' : ''),
         { details: { chainId, selector, deployed } });
     }
     const set = pick.chains[chainId]!;
     const src = (k: string) => this.fieldSource[`${pick.version}|${chainId}|${k}`] ?? 'embedded';
     const source: DeploymentSource = src('router') === 'remote' || src('quoter') === 'remote' ? 'remote' : 'embedded';
     return { chainId, version: pick.version, status: pick.status, contracts: { ...set }, source };
+  }
+
+  /** Router and Quoter both pinned in this package (not filled by a fetched document). */
+  private isPinned(version: string, chainId: SupportedChainId): boolean {
+    const src = (k: string) => this.fieldSource[`${version}|${chainId}|${k}`];
+    return src('router') === 'embedded' && src('quoter') === 'embedded';
   }
 
   private latestKnownVersion(selector?: string): string {

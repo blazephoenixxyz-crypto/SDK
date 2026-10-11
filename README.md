@@ -116,17 +116,20 @@ The SDK adapts to what each version can do (`featuresOf(version)`):
 | on-chain `batchQuote` | parallel previews | ✅ chunked |
 | `ExecutionProof` on every fill (quoted vs realised vs floor) | — | ✅ |
 
-### New deployments reach you without a new SDK release
+### Only pinned addresses are routed to by default
 
 The registry has three layers:
 
 1. **Embedded** — shipped in the package. Non-zero addresses are **pins**: nothing fetched
-   at runtime can move them.
+   at runtime can move them, and by default they are the only Router and Quoter addresses
+   a quote or a swap uses. A new deployment reaches you with a new SDK release.
 2. **Remote** — `GET https://blazephoenix.xyz/api/deployments` (static JSON, refreshed every
    10 min in the background; the first lookup waits at most 3 s). It can only fill what the
    snapshot doesn't know — e.g. the 2.0.0 addresses the day they are deployed — and only for
-   versions that can be verified on-chain (2.x+). Every remote-sourced set is **verified on
-   your RPC before first use**:
+   versions that can be verified on-chain (2.x+). Those versions are listed, but routed to
+   only with `registry: { remoteVersions: true }`: the on-chain check reads the entry's own
+   contracts, so it cannot tell a real deployment from a look-alike. With the opt-in, every
+   remote-sourced set is still **verified on your RPC before first use**:
    code at every address, `VERSION()` matches, and the Quoter, Router and Solver all point at
    the same Hub and Solver. Anything else fails closed (`deployment_unverified`).
 3. **Your overrides** — always win:
