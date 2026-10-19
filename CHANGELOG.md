@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased — only pinned addresses are routed to by default
+## 1.2.0 — `buildSwap` signs your minimum as given, and can take it from the exact quote
+
+- `buildSwap({ exact: true })` also reads `previewPlanExact` in the same block as the route
+  it encodes and sets `minOut` from `exactOut`: a fixed 50 bps safety margin first, then
+  `slippageBps` off that, and never below the default minimum. On a concentrated route where
+  the Solver's capacity clamp keeps the default quote conservative, this minimum tracks the
+  dry-run of every leg. The calldata still executes the default route, and an exact read that
+  prices another route is refused (`calldata_mismatch`). `plan.exactOut` reports the figure
+  used. The default path is unchanged.
+- A `userMinOut` passed to `buildSwap` is the minimum the transaction carries, as given. One
+  below the quote net of `slippageBps` (or below the on-chain floor) is refused with the new
+  code `min_implausible` instead of being raised silently; raise `slippageBps` when a lower
+  minimum is intended. With `exact: true`, one above `exactOut` less the margin is refused
+  with `min_above_exact`. These are the same rules the site's `/api/quote/decode` applies.
+- Base: `CHAINS[8453].bzpx` is the current BZPX token,
+  `0x053D75c00FdD571538492e3B1686Bd963a0911A7`. No staking engine is pinned, so `solvency()`
+  answers `not_deployed` until one is.
+
+## 1.1.0 — only pinned addresses are routed to by default
 
 - `registry.remoteVersions` (default `false`): a version that only the fetched registry
   document supplies is listed, but `resolve()`, quotes and `buildSwap` use only Router and

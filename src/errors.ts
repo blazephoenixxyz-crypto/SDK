@@ -30,6 +30,8 @@ export type BlazeErrorCode =
   | 'no_route'
   | 'not_executable'
   | 'calldata_mismatch'
+  | 'min_implausible'
+  | 'min_above_exact'
   | 'deployment_unverified'
   | 'reverted'
   | 'wallet_chain_mismatch';

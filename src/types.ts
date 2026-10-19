@@ -93,7 +93,8 @@ export interface QuoteRequest {
   amountIn?: bigint | string;
   /** Input in HUMAN units ("1.5"); decimals are read from the token on your RPC. */
   amount?: string;
-  /** Tighten the on-chain floor with your own minimum (base units of tokenOut). */
+  /** Your own minimum (base units of tokenOut). In buildSwap it is the signed minimum as given,
+   *  and it is refused (`min_implausible`) below the quote net of slippageBps or the on-chain floor. */
   userMinOut?: bigint | string;
   /** Protocol version for this call (default: the client's, itself 'latest'). */
   version?: string;
@@ -163,6 +164,15 @@ export interface SwapRequest extends QuoteRequest {
   mode?: 'route' | 'best';
   /** Allowance to request when approval is needed: 'exact' (default) or 'max'. */
   approve?: 'exact' | 'max';
+  /**
+   * true — also read previewPlanExact (every concentrated leg dry-run) in the same block and
+   * derive minOut from its exactOut: a fixed 50 bps safety margin first, then slippageBps off
+   * that, never below the default minimum. The calldata still executes the route of the default
+   * path; the exact read must price that same route, or buildSwap refuses. A userMinOut above
+   * exactOut less the margin is refused (`min_above_exact`). One more eth_call; the swap reverts
+   * instead of filling short when the pool moves past the tolerance.
+   */
+  exact?: boolean;
 }
 
 export interface ApprovalStep {
@@ -191,6 +201,8 @@ export interface SwapPlan {
   unwrapAfter: boolean;
   /** Ordered transactions to send: [approval?, swap]. */
   steps: TxRequest[];
+  /** With `exact: true`: the previewPlanExact output minOut was derived from. */
+  exactOut?: bigint;
 }
 
 export interface SimulationResult {

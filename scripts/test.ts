@@ -78,6 +78,8 @@ eq('arbitrum-one', resolveChain('arbitrum-one'), 42161);
 eq('robinhood numeric', resolveChain('4663'), 4663);
 check('unknown chain throws', (() => { try { resolveChain('solana'); return false; } catch { return true; } })());
 eq('robinhood dollar asset is USDG', CHAINS[4663].usdc, '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
+eq('base BZPX is the current token', CHAINS[8453].bzpx, '0x053D75c00FdD571538492e3B1686Bd963a0911A7');
+check('no staking engine pinned on any chain', Object.values(CHAINS).every((c) => c.staking === undefined));
 eq('fee bps', FEE_BPS, 28);
 
 // ── 100% your RPC: nothing in the package can reach a node of ours or anyone's ──
@@ -283,9 +285,11 @@ interface MockOpts {
   decimals?: number;
   outFor?: (amountIn: bigint) => bigint;
   simulateRevert?: Hex;
+  exactFor?: (amountIn: bigint) => bigint;   // what previewPlanExact answers (default outFor − 5)
+  exactPool?: Address;                       // previewPlanExact prices a different pool
 }
 function mockProvider(o: MockOpts = {}) {
-  const calls: { method: string; fn?: string; to?: string }[] = [];
+  const calls: { method: string; fn?: string; to?: string; block?: unknown }[] = [];
   const quoter = (o.quoter ?? V1.quoter).toLowerCase();
   const router = (o.router ?? V1.router).toLowerCase();
   const outFor = o.outFor ?? ((a: bigint) => a * 3_000n / 10n ** 12n);
@@ -307,7 +311,7 @@ function mockProvider(o: MockOpts = {}) {
       const t = to.toLowerCase();
       if (t === quoter) {
         const d = decodeFunctionData({ abi: QUOTER_ABI, data });
-        calls.push({ method, fn: d.functionName, to: t });
+        calls.push({ method, fn: d.functionName, to: t, block: p[1] });
         if (o.revert) { const e = new Error('execution reverted') as Error & { code: number; data: Hex }; e.code = 3; e.data = o.revert; throw e; }
         const hub = o.hub ?? '0x00000000000000000000000000000000000000a1';
         const solver = o.solver ?? '0x00000000000000000000000000000000000000a2';
@@ -344,7 +348,10 @@ function mockProvider(o: MockOpts = {}) {
           }
           case 'previewPlanExact': {
             const [tIn, tOut, amt] = d.args as [Address, Address, bigint];
-            return encodeFunctionResult({ abi: QUOTER_ABI, functionName: 'previewPlanExact', result: [mkRoute(tIn, tOut, amt, outFor(amt)), outFor(amt) - 5n] as never });
+            const ex = o.exactFor ? o.exactFor(amt) : outFor(amt) - 5n;
+            const r = mkRoute(tIn, tOut, amt, ex);
+            if (o.exactPool) r.hops[0]!.legs[0]!.pool = o.exactPool;
+            return encodeFunctionResult({ abi: QUOTER_ABI, functionName: 'previewPlanExact', result: [r, ex] as never });
           }
           default: throw new Error(`quoter fn ${d.functionName}`);
         }
@@ -525,8 +532,18 @@ console.log('client · 2.x');
   eq('2.x buildSwap: minimum tightened to 30 bps', decodeSwapExactIn(plan.tx.data).userMinOut, minOutFor(plan.quote.amountOut, 30, plan.quote.preview.effectiveMinOut));
   check('2.x buildSwap: approval named without `from` (unchecked)', plan.approval !== null && plan.approval.current === undefined);
 
-  const withMin = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 2_950_000_000n });
-  check('2.x userMinOut → previewAndEncodeWithMinOut', calls.some((c) => c.fn === 'previewAndEncodeWithMinOut') && decodeSwapExactIn(withMin.tx.data).userMinOut >= 2_950_000_000n);
+  const withMin = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 2_980_000_000n });
+  check('2.x userMinOut → previewAndEncodeWithMinOut', calls.some((c) => c.fn === 'previewAndEncodeWithMinOut'));
+  eq('2.x userMinOut: the tx carries the caller\'s minimum as given', [decodeSwapExactIn(withMin.tx.data).userMinOut, withMin.minOut], [2_980_000_000n, 2_980_000_000n]);
+  await throwsCode('2.x userMinOut below the quote net of slippage is refused',
+    () => blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 2_950_000_000n }), 'min_implausible');
+  await throwsCode('2.x userMinOut = 1 is refused',
+    () => blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 1n }), 'min_implausible');
+  await throwsCode('2.x native: userMinOut below the quote net of slippage is refused',
+    () => blaze.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, userMinOut: 1n }), 'min_implausible');
+  await throwsCode('solvency on Base: no staking engine pinned', () => blaze.solvency('base'), 'not_deployed');
+  const lowSlip = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 2_950_000_000n, slippageBps: 200 });
+  eq('2.x userMinOut accepted once slippageBps admits it', lowSlip.minOut, 2_950_000_000n);
 
   for (const tamper of ['recipient', 'amount', 'route'] as const) {
     const { provider: evil } = mockProvider({ quoter: Q, router: R, version: '2.0.0', tamper });
@@ -541,6 +558,46 @@ console.log('client · 2.x');
 
   const best = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, mode: 'best' });
   eq("2.x mode 'best' → swapBestExactIn", decodeFunctionData({ abi: ROUTER_ABI, data: best.tx.data }).functionName, 'swapBestExactIn');
+
+  // exact: true — the minimum comes from previewPlanExact (a concentrated route the
+  // preview under-promises by 30 %), never below the default minimum.
+  check('default buildSwap never calls previewPlanExact', !calls.some((c) => c.fn === 'previewPlanExact'));
+  const deep = (a: bigint) => (a * 3_000n / 10n ** 12n) * 13n / 10n;   // exact = preview gross × 1.3
+  const mkExact = (x: Partial<MockOpts> = {}) => {
+    const m = mockProvider({ quoter: Q, router: R, version: '2.0.0', exactFor: deep, ...x });
+    return { calls: m.calls, b: new BlazePhoenix({ rpc: { base: m.provider }, contracts: override, registry: { mode: 'embedded' } }) };
+  };
+  const x1 = mkExact();
+  const ep = await x1.b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true });
+  eq('exact: minOut = exactOut − 50 bps margin − 50 bps slippage, in the Quoter-encoded swapExactIn',
+    [decodeSwapExactIn(ep.tx.data).userMinOut, ep.minOut, ep.exactOut, ep.encodedBy], [minOutFor(minOutFor(3_900_000_000n, 50, 0n), 50, 0n), minOutFor(minOutFor(3_900_000_000n, 50, 0n), 50, 0n), 3_900_000_000n, 'quoter']);
+  check('exact: tighter than the default minimum', ep.minOut > minOutFor(ep.quote.amountOut, 50, ep.quote.preview.effectiveMinOut));
+  check('exact: one previewPlanExact read', x1.calls.filter((c) => c.fn === 'previewPlanExact').length === 1);
+  eq('exact: the encode and the exact read pinned to one block',
+    x1.calls.filter((c) => c.fn === 'previewAndEncode' || c.fn === 'previewPlanExact').map((c) => c.block), ['0x100', '0x100']);
+  const ep10 = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true, slippageBps: 10 });
+  eq('exact: 50 bps of margin off the exact quote, then the slippage (10 bps)', ep10.minOut, minOutFor(minOutFor(3_900_000_000n, 50, 0n), 10, 0n));
+  const low = await mkExact({ exactFor: (a: bigint) => (a * 3_000n / 10n ** 12n) * 9n / 10n }).b
+    .buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true });
+  eq('exact: never below the default minimum', low.minOut, minOutFor(low.quote.amountOut, 50, low.quote.preview.effectiveMinOut));
+  const lowN = await mkExact({ exactFor: (a: bigint) => (a * 3_000n / 10n ** 12n) * 9n / 10n }).b
+    .buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, exact: true });
+  eq('exact + native: never below the default minimum either', lowN.minOut, minOutFor(lowN.quote.amountOut, 50, lowN.quote.preview.effectiveMinOut));
+  await throwsCode('exact: an exact quote of a different route is refused',
+    () => mkExact({ exactPool: EVIL }).b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true }), 'calldata_mismatch');
+  const eb = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, mode: 'best', exact: true });
+  eq("exact + mode 'best': the swapBestExactIn minimum", decodeFunctionData({ abi: ROUTER_ABI, data: eb.tx.data }).args[3], minOutFor(minOutFor(3_900_000_000n, 50, 0n), 50, 0n));
+  const en = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, exact: true });
+  eq('exact + native: the swapExactInNative minimum', decodeFunctionData({ abi: ROUTER_ABI, data: en.tx.data }).args[1], minOutFor(minOutFor(390_000_000n, 50, 0n), 50, 0n));
+  // userMinOut in exact mode: accepted inside [floor, exactOut − 50 bps], carried as given.
+  const atCeil = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true, userMinOut: 3_880_500_000n });
+  eq('exact: userMinOut at exactOut − 50 bps is carried as given', [decodeSwapExactIn(atCeil.tx.data).userMinOut, atCeil.minOut], [3_880_500_000n, 3_880_500_000n]);
+  await throwsCode('exact: userMinOut above exactOut − 50 bps is refused',
+    () => mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true, userMinOut: 3_880_500_001n }), 'min_above_exact');
+  await throwsCode('exact: userMinOut below the exact floor is refused',
+    () => mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true, userMinOut: 3_000_000_000n }), 'min_implausible');
+  await throwsCode('exact + native: userMinOut above the ceiling is refused',
+    () => mkExact().b.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, exact: true, userMinOut: 388_050_001n }), 'min_above_exact');
 
   const out = await blaze.quoteBatch([
     { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n },
