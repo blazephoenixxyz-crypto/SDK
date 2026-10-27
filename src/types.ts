@@ -133,8 +133,10 @@ export interface ExactQuote {
   tokenIn: Address;
   tokenOut: Address;
   amountIn: bigint;
-  /** Execution-grade NET output (every concentrated leg dry-run on the pool). */
+  /** Execution-grade NET output (every concentrated leg dry-run on its venue), net of the protocol fee. */
   exactOut: bigint;
+  /** The scalar exactly as the Quoter returned it (gross of the fee on 1.x Quoters). */
+  quoterOut: bigint;
   route: Route;
   quotedAt: number;
 }

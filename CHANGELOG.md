@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.1 — one meaning per field
+
+- `quoteExact`: `exactOut` is net of the protocol fee on every Quoter. A 1.x Quoter returns the
+  dry-run total gross of the fee, so the SDK now nets it (28 bps, rounded up); the new
+  `quoterOut` keeps the scalar exactly as the Quoter returned it.
+- `amount` and `amountIn` in the same request must agree. Values that differ are refused with
+  `bad_request` instead of one silently winning.
+- `simulate`: a revert text that is not a decoded protocol error is reduced to one printable
+  line of at most 120 characters.
+- The RPC transport refuses to follow an HTTP redirect, so the https-only rule holds past the
+  first request.
+- Robinhood Chain block time is 0.104 s (was 2 s), which sets the default `getFills` look-back.
+
 ## 1.2.0 — `buildSwap` signs your minimum as given, and can take it from the exact quote
 
 - `buildSwap({ exact: true })` also reads `previewPlanExact` in the same block as the route

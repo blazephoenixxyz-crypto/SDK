@@ -26,10 +26,10 @@ import {
 } from './calldata.js';
 import { phoenixCheck, routeIsConsistent } from './checks.js';
 import {
-  CHAINS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
+  CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
 } from './constants.js';
 import { featuresOf, isZero, type VersionFeatures, type VersionSelector } from './deployments.js';
-import { BlazeError, decodeBlazeError, isTransportError } from './errors.js';
+import { BlazeError, decodeBlazeError, isTransportError, untrustedText } from './errors.js';
 import { MAX_UINT256, buildApproveTx, toBaseUnits } from './erc20.js';
 import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
@@ -273,6 +273,17 @@ export class BlazePhoenix {
       if (typeof req.amountIn === 'bigint') v = req.amountIn;
       else if (INT.test(String(req.amountIn).trim())) v = BigInt(String(req.amountIn).trim());
       else throw new BlazeError('bad_request', 'amountIn must be an integer in base units — use `amount` for human units ("1.5")');
+      // Both spellings of the amount in one request must agree: no silent precedence.
+      if (req.amount !== undefined && req.amount !== null && req.amount !== '') {
+        const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
+          throw new BlazeError('bad_request', 'amount and amountIn are both set and the decimals could not be read to compare them — pass only one', { cause: e });
+        });
+        let human: bigint;
+        try { human = toBaseUnits(req.amount, d); } catch (e) { throw new BlazeError('bad_request', (e as Error).message); }
+        if (human !== v) {
+          throw new BlazeError('bad_request', `amount and amountIn disagree (${human} vs ${v} base units): pass only one`);
+        }
+      }
     } else if (req.amount !== undefined) {
       const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
         throw new BlazeError('bad_request', `could not read decimals of ${tIn.address} on your RPC — pass amountIn in base units`, { cause: e });
@@ -385,9 +396,15 @@ export class BlazePhoenix {
         args: [tIn.address, tOut.address, amountIn],
         ...(req.blockNumber !== undefined ? { blockNumber: req.blockNumber } : {}),
       })) as unknown as [Route, bigint];
+      // 1.x Quoters return the dry-run total GROSS of the protocol fee; 2.x Quoters return it net.
+      // `exactOut` is documented NET, so a 1.x scalar is netted here (rounded up, like the Router's
+      // deduction); `quoterOut` keeps what the Quoter returned.
+      const net = featuresOf(ctx.dep.version).previewAndEncode
+        ? exactOut
+        : exactOut - (exactOut * BigInt(FEE_BPS) + 9_999n) / 10_000n;
       return {
         chainId: ctx.chainId, version: ctx.dep.version, tokenIn: tIn.address, tokenOut: tOut.address,
-        amountIn, exactOut, route, quotedAt: Date.now(),
+        amountIn, exactOut: net, quoterOut: exactOut, route, quotedAt: Date.now(),
       };
     } catch (e) {
       this.wrapReadError(e, 'exact quote');
@@ -627,7 +644,7 @@ export class BlazePhoenix {
     } catch (e) {
       if (isTransportError(e)) throw new BlazeError('rpc_error', `simulation: your RPC failed (${(e as Error)?.message?.split('\n')[0]})`, { cause: e });
       const d = decodeBlazeError(e);
-      return { ok: false, error: d ?? { contract: 'unknown', name: 'revert', reason: (e as Error)?.message?.split('\n')[0] ?? 'execution reverted' } };
+      return { ok: false, error: d ?? { contract: 'unknown', name: 'revert', reason: untrustedText((e as Error)?.message?.split('\n')[0]) || 'execution reverted' } };
     }
   }
 
