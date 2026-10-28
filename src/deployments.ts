@@ -60,9 +60,9 @@ export const EMBEDDED_DEPLOYMENTS: DeploymentRegistry = {
     {
       version: '2.0.0',
       status: 'pending',
-      source: 'blazephoenixxyz-crypto/Blaze-Phoenix-Dex@07c8563',
+      source: 'blazephoenixxyz-crypto/Blaze-Phoenix-Dex@f746a48',
       notes: 'Final generation (Core/Hub/Solver/Quoter/Router). Addresses arrive through the registry the day they are deployed.',
-      chains: { 8453: pending(), 1: pending(), 10: pending(), 42161: pending(), 4663: pending() },
+      chains: { 8453: pending(), 10: pending(), 42161: pending(), 4663: pending() },
     },
     {
       version: '1.0.0',
