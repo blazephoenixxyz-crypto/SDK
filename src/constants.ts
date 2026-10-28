@@ -51,8 +51,7 @@ export const CHAINS: Record<SupportedChainId, ChainInfo> = {
     explorer: 'https://basescan.org',
     weth: '0x4200000000000000000000000000000000000006',
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    bzpx: '0x23113e72165a034265Ab8Bf2277CCB7a85Cb7483',
-    staking: '0x3f60C7aa0c36a78D200405feBE143d2Cf3fA0c77',
+    bzpx: '0x053D75c00FdD571538492e3B1686Bd963a0911A7',
     blockTime: 2,
   },
   10: {
@@ -82,7 +81,7 @@ export const CHAINS: Record<SupportedChainId, ChainInfo> = {
     explorer: 'https://robinhoodchain.blockscout.com',
     weth: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
     usdc: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
-    blockTime: 2,
+    blockTime: 0.104, // measured ~0.104 s/block
   },
 };
 

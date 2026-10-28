@@ -65,7 +65,7 @@ function urlTransport(url: string, o: Required<TransportOptions>): Transport {
   const u = url.trim();
   return u.startsWith('ws')
     ? webSocket(u, { timeout: o.timeoutMs, retryCount: o.retries })
-    : http(u, { timeout: o.timeoutMs, retryCount: o.retries, batch: o.batch });
+    : http(u, { timeout: o.timeoutMs, retryCount: o.retries, batch: o.batch, fetchOptions: { redirect: 'error' } });
 }
 
 /** Keys live in RPC URLs (…/v2/KEY). Never print them. */

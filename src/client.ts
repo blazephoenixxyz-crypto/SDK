@@ -26,10 +26,10 @@ import {
 } from './calldata.js';
 import { phoenixCheck, routeIsConsistent } from './checks.js';
 import {
-  CHAINS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
+  CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
 } from './constants.js';
 import { featuresOf, isZero, type VersionFeatures, type VersionSelector } from './deployments.js';
-import { BlazeError, decodeBlazeError, isTransportError } from './errors.js';
+import { BlazeError, decodeBlazeError, isTransportError, untrustedText } from './errors.js';
 import { MAX_UINT256, buildApproveTx, toBaseUnits } from './erc20.js';
 import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
@@ -273,6 +273,17 @@ export class BlazePhoenix {
       if (typeof req.amountIn === 'bigint') v = req.amountIn;
       else if (INT.test(String(req.amountIn).trim())) v = BigInt(String(req.amountIn).trim());
       else throw new BlazeError('bad_request', 'amountIn must be an integer in base units — use `amount` for human units ("1.5")');
+      // Both spellings of the amount in one request must agree: no silent precedence.
+      if (req.amount !== undefined && req.amount !== null && req.amount !== '') {
+        const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
+          throw new BlazeError('bad_request', 'amount and amountIn are both set and the decimals could not be read to compare them — pass only one', { cause: e });
+        });
+        let human: bigint;
+        try { human = toBaseUnits(req.amount, d); } catch (e) { throw new BlazeError('bad_request', (e as Error).message); }
+        if (human !== v) {
+          throw new BlazeError('bad_request', `amount and amountIn disagree (${human} vs ${v} base units): pass only one`);
+        }
+      }
     } else if (req.amount !== undefined) {
       const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
         throw new BlazeError('bad_request', `could not read decimals of ${tIn.address} on your RPC — pass amountIn in base units`, { cause: e });
@@ -385,9 +396,15 @@ export class BlazePhoenix {
         args: [tIn.address, tOut.address, amountIn],
         ...(req.blockNumber !== undefined ? { blockNumber: req.blockNumber } : {}),
       })) as unknown as [Route, bigint];
+      // 1.x Quoters return the dry-run total GROSS of the protocol fee; 2.x Quoters return it net.
+      // `exactOut` is documented NET, so a 1.x scalar is netted here (rounded up, like the Router's
+      // deduction); `quoterOut` keeps what the Quoter returned.
+      const net = featuresOf(ctx.dep.version).previewAndEncode
+        ? exactOut
+        : exactOut - (exactOut * BigInt(FEE_BPS) + 9_999n) / 10_000n;
       return {
         chainId: ctx.chainId, version: ctx.dep.version, tokenIn: tIn.address, tokenOut: tOut.address,
-        amountIn, exactOut, route, quotedAt: Date.now(),
+        amountIn, exactOut: net, quoterOut: exactOut, route, quotedAt: Date.now(),
       };
     } catch (e) {
       this.wrapReadError(e, 'exact quote');
@@ -490,6 +507,55 @@ export class BlazePhoenix {
     let encodedBy: SwapPlan['encodedBy'] = 'sdk';
     let entry: SwapPlan['entry'];
     let minOut: bigint;
+    // exact: both reads pinned to one block, so the dry-run prices the route the calldata executes.
+    let at: bigint | undefined;
+    if (req.exact) {
+      try { at = await ctx.client.getBlockNumber(); } catch (e) { this.wrapReadError(e, 'block number'); }
+    }
+    const pin = at !== undefined ? { blockNumber: at } : {};
+    let exactOut: bigint | undefined;
+    const exactRead = async (route: Route): Promise<bigint> => {
+      let ex: [Route, bigint];
+      try {
+        ex = (await ctx.client.readContract({
+          address: ctx.dep.contracts.quoter, abi: QUOTER_ABI, functionName: 'previewPlanExact',
+          args: [tIn.address, tOut.address, amountIn], ...pin,
+        })) as unknown as [Route, bigint];
+      } catch (e) {
+        this.wrapReadError(e, 'exact quote');
+      }
+      if (!samePath(ex[0], route)) {
+        throw new BlazeError('calldata_mismatch', 'previewPlanExact priced a different route than the one to execute');
+      }
+      exactOut = ex[1];
+      return ex[1];
+    };
+    // The signed minimum: the caller's userMinOut when one is set, refused when it sits outside
+    // the window this read calls plausible; otherwise the floor itself. The floor is the quote
+    // net of slippageBps, never under the on-chain floor; with exact, also the exact output less
+    // the margin and then slippageBps. Unlike the site's pure decode, this read ran on the
+    // caller's own RPC, so without a userMinOut the floor is a sound minimum.
+    const settleMin = async (p: Preview): Promise<bigint> => {
+      let floor = minOutFor(p.netOut, slippageBps, p.ironFloor);
+      let ceil: bigint | undefined;
+      if (req.exact) {
+        const ex = await exactRead(p.route);
+        ceil = minOutFor(ex, EXACT_MARGIN_BPS, 0n);
+        floor = maxBig(floor, minOutFor(ceil, slippageBps, 0n));
+      }
+      if (userMinOut === 0n) return floor;
+      if (userMinOut < floor) {
+        throw new BlazeError('min_implausible',
+          `userMinOut is below ${floor} (this quote net of slippageBps): set it from a price you trust, or raise slippageBps if a lower minimum is intended`,
+          { details: { userMinOut: userMinOut.toString(), floor: floor.toString() } });
+      }
+      if (ceil !== undefined && userMinOut > ceil && userMinOut > floor) {
+        throw new BlazeError('min_above_exact',
+          `userMinOut is above ${ceil} (exactOut less ${EXACT_MARGIN_BPS} bps): an honest swap at this minimum may revert`,
+          { details: { userMinOut: userMinOut.toString(), ceiling: ceil.toString() } });
+      }
+      return userMinOut;
+    };
 
     if (features.previewAndEncode && !tIn.native && mode === 'route') {
       // 2.x: ONE eth_call returns the preview AND the Router calldata that executes it.
@@ -498,18 +564,18 @@ export class BlazePhoenix {
         const r = userMinOut > 0n
           ? await ctx.client.readContract({
             address: ctx.dep.contracts.quoter, abi: QUOTER_ABI, functionName: 'previewAndEncodeWithMinOut',
-            args: [tIn.address, tOut.address, amountIn, userMinOut, recipient, deadline],
+            args: [tIn.address, tOut.address, amountIn, userMinOut, recipient, deadline], ...pin,
           })
           : await ctx.client.readContract({
             address: ctx.dep.contracts.quoter, abi: QUOTER_ABI, functionName: 'previewAndEncode',
-            args: [tIn.address, tOut.address, amountIn, recipient, deadline],
+            args: [tIn.address, tOut.address, amountIn, recipient, deadline], ...pin,
           });
         [pv, call] = r as unknown as [Preview, Hex];
       } catch (e) {
         this.wrapReadError(e, 'previewAndEncode');
       }
       assertExecutable(pv, tIn.address, tOut.address, call);
-      minOut = maxBig(minOutFor(pv.netOut, slippageBps, pv.effectiveMinOut), userMinOut);
+      minOut = await settleMin(pv);
       verifySwapExactIn(call, {
         tokenIn: tIn.address, tokenOut: tOut.address, amountIn, recipient, deadline,
         minOutAtLeast: pv.effectiveMinOut, route: pv.route,
@@ -518,9 +584,9 @@ export class BlazePhoenix {
       encodedBy = 'quoter';
       entry = 'swapExactIn';
     } else {
-      ({ pv, fb } = await this.readPreview(ctx, tIn.address, tOut.address, amountIn, userMinOut));
+      ({ pv, fb } = await this.readPreview(ctx, tIn.address, tOut.address, amountIn, userMinOut, at));
       assertExecutable(pv, tIn.address, tOut.address);
-      minOut = maxBig(minOutFor(pv.netOut, slippageBps, pv.effectiveMinOut), userMinOut);
+      minOut = await settleMin(pv);
       if (mode === 'best') {
         entry = 'swapBestExactIn';
         data = encodeSwapBestExactIn(tIn.address, tOut.address, amountIn, minOut, recipient, deadline);
@@ -558,6 +624,7 @@ export class BlazePhoenix {
       quote, entry, encodedBy, tx, recipient, minOut, deadline, slippageBps, approval,
       unwrapAfter: tOut.native,
       steps: approval ? [approval.tx, tx] : [tx],
+      ...(exactOut !== undefined ? { exactOut } : {}),
     };
   }
 
@@ -577,7 +644,7 @@ export class BlazePhoenix {
     } catch (e) {
       if (isTransportError(e)) throw new BlazeError('rpc_error', `simulation: your RPC failed (${(e as Error)?.message?.split('\n')[0]})`, { cause: e });
       const d = decodeBlazeError(e);
-      return { ok: false, error: d ?? { contract: 'unknown', name: 'revert', reason: (e as Error)?.message?.split('\n')[0] ?? 'execution reverted' } };
+      return { ok: false, error: d ?? { contract: 'unknown', name: 'revert', reason: untrustedText((e as Error)?.message?.split('\n')[0]) || 'execution reverted' } };
     }
   }
 
@@ -792,6 +859,24 @@ function checkDeadlineSec(n: number): number {
 }
 
 const maxBig = (a: bigint, b: bigint) => (a > b ? a : b);
+
+/** Safety margin applied to exact quotes: the exact-mode minimum stays at least this far under
+ *  exactOut, before slippageBps (the same margin the site's decode applies). */
+const EXACT_MARGIN_BPS = 50;
+
+/** Same pools, in the same order and direction: amounts may differ, the path may not. */
+function samePath(a: Route, b: Route): boolean {
+  const eqA = (x: string, y: string) => x.toLowerCase() === y.toLowerCase();
+  return a.hops.length === b.hops.length && a.hops.every((h, i) => {
+    const g = b.hops[i]!;
+    return eqA(h.tokenIn, g.tokenIn) && eqA(h.tokenOut, g.tokenOut) && h.legs.length === g.legs.length
+      && h.legs.every((l, j) => {
+        const m = g.legs[j]!;
+        return eqA(l.pool, m.pool) && eqA(l.hooks, m.hooks) && l.kind === m.kind && l.fee === m.fee
+          && l.tickSpacing === m.tickSpacing && l.zeroForOne === m.zeroForOne && l.stable === m.stable;
+      });
+  });
+}
 
 // ── deep links (no RPC) ──────────────────────────────────────────────────────
 

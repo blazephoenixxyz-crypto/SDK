@@ -58,9 +58,11 @@ const plan = await blaze.buildSwap({
   chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5',
   recipient: me, from: me,           // `from` enables the allowance check
   slippageBps: 50,                   // default 50; never below the on-chain floor
+  exact: true,                       // optional: minOut from previewPlanExact (one more eth_call)
 });
 plan.steps;       // [approve?, swap] — { chainId, to, data, value }
 plan.minOut;      // the minimum the Router will enforce for you
+                  // (your userMinOut as given, when set; refused below the quote net of slippage)
 plan.encodedBy;   // 'quoter' on 2.x (the Quoter's own bytes, verified) · 'sdk' on 1.x
 
 // 3) optional: dry-run on your node, then execute with YOUR wallet
@@ -161,7 +163,7 @@ await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, er
 await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
 const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
 await blaze.tokenInfo('base', '0x…');  // symbol / name / decimals
-await blaze.solvency();                // the staking engine's proof-of-solvency (Base)
+await blaze.solvency();                // staking proof-of-solvency; `not_deployed` where no engine is registered
 toJSON(quote);                         // bigint → string, for HTTP / queues / LLMs
 ```
 
@@ -186,6 +188,8 @@ Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; pr
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
 | `not_executable` | the Quoter says the route cannot settle now (`canExecute = false`) |
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
+| `min_implausible` | `buildSwap`: `userMinOut` below the quote net of `slippageBps` (or the on-chain floor) |
+| `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut` above `exactOut` less the 50 bps safety margin |
 | `deployment_unverified` | a registry deployment failed on-chain verification |
 | `unsupported_by_version` | e.g. native ETH input on a 1.x Router |
 | `not_deployed` / `bad_request` / `wallet_chain_mismatch` / `reverted` | as named |

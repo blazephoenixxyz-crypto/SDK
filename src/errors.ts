@@ -20,6 +20,12 @@ function scrubCause(c: unknown, depth = 0): unknown {
   return out;
 }
 
+/** Text that came from outside (a token's revert reason): printable ASCII only, one line, capped.
+ *  It is shown to people and agents, so it never carries control characters or a long payload. */
+export function untrustedText(t: string | undefined, max = 120): string {
+  return (t ?? '').replace(/[^\x20-\x7e]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
 export type BlazeErrorCode =
   | 'rpc_required'
   | 'rpc_chain_mismatch'
@@ -30,6 +36,8 @@ export type BlazeErrorCode =
   | 'no_route'
   | 'not_executable'
   | 'calldata_mismatch'
+  | 'min_implausible'
+  | 'min_above_exact'
   | 'deployment_unverified'
   | 'reverted'
   | 'wallet_chain_mismatch';
