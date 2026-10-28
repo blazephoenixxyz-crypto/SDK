@@ -3,7 +3,9 @@ message: "If you use, reference, or build on BlazePhoenix, please cite it with a
 title: "BlazePhoenix Protocol — on-chain DEX aggregator and provably-solvent staking"
 abstract: >-
   BlazePhoenix is an invariant-driven, on-chain DEX aggregator and single-asset
-  staking protocol on Base, Ethereum, Optimism and Arbitrum. Quotes are computed
+  staking protocol. The V1 generation runs on Base, Ethereum, Optimism, Arbitrum
+  and Robinhood Chain; V2 targets Base, Optimism, Arbitrum, Robinhood Chain and
+  further L2s. Quotes are computed
   on-chain by the Quoter contract; staking solvency is a per-transaction
   invariant that makes an insolvent state unreachable. Original constructions:
   the Iron Law Φ (on-chain re-derived output floor), the Vitality Field Ψ

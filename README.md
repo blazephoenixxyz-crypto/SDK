@@ -15,7 +15,7 @@ npm i @blazephoenix/sdk viem
 
 ## BlazePhoenix in one sentence
 
-BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine that proves its own solvency on every transaction. It runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
+BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine that proves its own solvency on every transaction. V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
 
 **Swap** in the [app](https://blazephoenix.xyz/?tab=swap) · **integrate** with the [SDK](https://github.com/blazephoenixxyz-crypto/SDK) (`npm i @blazephoenix/sdk`) · **connect an agent** to the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) (`https://blazephoenix.xyz/mcp`, no key)
 
@@ -100,7 +100,7 @@ Protocol versions are deployments, not SDK versions:
 | version | status | what it is |
 |---|---|---|
 | `1.0.0` | **live** on all five chains | the generation deployed at launch |
-| `2.0.0` | pending | the final Core / Hub / Solver / Quoter / Router from [BlazePhoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) (`VERSION()` = `"2.0.0"`) |
+| `2.0.0` | pending | the generation in development (Router, Solver, Hub, Quoter and Gate, with the Core and Math libraries), targeting Base, Optimism, Arbitrum, Robinhood Chain and further L2s and not Ethereum L1, from [BlazePhoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) (`VERSION()` = `"2.0.0"`) |
 
 ```ts
 new BlazePhoenix({ rpc, version: 'latest' }); // default: newest version deployed on each chain
