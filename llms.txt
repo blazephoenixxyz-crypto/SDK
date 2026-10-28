@@ -22,7 +22,9 @@ const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', 
 
 `rpc` accepts a URL, a fallback list, an EIP-1193 provider, a viem Transport or a per-chain map. With no `rpc`, the client reads `BLAZEPHOENIX_RPC_URL` (one node) or `BLAZEPHOENIX_RPC_BASE`, `_ETHEREUM`, `_OPTIMISM`, `_ARBITRUM`, `_ROBINHOOD` (comma-separated for fallback).
 
-Main methods: `quote`, `quoteExact`, `quoteBatch`, `buildSwap` (verified Router calldata), `simulate`, `execute`, `getFills`, `watchFills`, `tokenInfo`, `solvency`, `deployments`. Every failure is a `BlazeError` with a stable `code`.
+Main methods: `quote`, `quoteExact`, `quoteBatch`, `buildSwap` (verified Router calldata), `simulate`, `execute`, `getFills`, `watchFills`, `tokenInfo`, `solvency`, `deployments`. `quoteExact` returns `exactOut`, net of the 0.28% protocol fee on every Quoter, and `quoterOut`, the scalar exactly as the Quoter returned it (gross of the fee on a 1.x Quoter). Every failure is a `BlazeError` with a stable `code`.
+
+Protocol versions are deployments, not SDK versions: 1.0.0 is live on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain; 2.0.0 is pending (Router, Solver, Hub, Quoter and Gate with the Core and Math libraries; Balancer V2/V3 and Curve NG via the Gate) and targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s, not Ethereum L1. `version: 'latest'` (default) uses the newest version deployed on each chain.
 
 ## Docs
 
