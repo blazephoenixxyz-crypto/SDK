@@ -100,7 +100,7 @@ Protocol versions are deployments, not SDK versions:
 | version | status | what it is |
 |---|---|---|
 | `1.0.0` | **live** on all five chains | the generation deployed at launch |
-| `2.0.0` | pending | the generation in development (Router, Solver, Hub, Quoter and Gate, with the Core and Math libraries), targeting Base, Optimism, Arbitrum, Robinhood Chain and further L2s and not Ethereum L1, from [BlazePhoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) (`VERSION()` = `"2.0.0"`) |
+| `2.0.0` | pending | the generation in development (Router, Solver, Hub, Quoter and Gate, with the Core and Math libraries; Balancer V2/V3 and Curve NG are reached through the Gate), targeting Base, Optimism, Arbitrum, Robinhood Chain and further L2s and not Ethereum L1, from [BlazePhoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) (`VERSION()` = `"2.0.0"`) |
 
 ```ts
 new BlazePhoenix({ rpc, version: 'latest' }); // default: newest version deployed on each chain
@@ -158,7 +158,9 @@ on-chain floor all match what you asked. Your slippage then only ever **tightens
 ## More
 
 ```ts
-await blaze.quoteExact(req);          // previewPlanExact: every concentrated leg dry-run on the pool
+await blaze.quoteExact(req);          // previewPlanExact: every concentrated leg dry-run on its venue.
+                                      // `exactOut` is net of the protocol fee on every Quoter; `quoterOut` is the
+                                      // scalar exactly as the Quoter returned it (gross of the fee on a 1.x Quoter)
 await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, error }
 await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
 const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
@@ -168,7 +170,8 @@ toJSON(quote);                         // bigint → string, for HTTP / queues /
 ```
 
 Pure helpers (no RPC): `buildApproveTx`, `buildWrapTx`, `buildUnwrapTx`, `permit2TypedData`,
-`encodeSwapExactInWithPermit2`, `encodeSwapExactIn`, `verifySwapExactIn`, `minOutFor`,
+`encodeSwapExactInWithPermit2`, `encodeSwapExactIn`, `encodeSwapExactInNative`, `encodeSwapBestExactIn`,
+`decodeSwapExactIn`, `verifySwapExactIn`, `tightenMinOut`, `minOutFor`, `phoenixCheck`,
 `decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`.
 
 Tokens: `0x` addresses, or the universal symbols `ETH` (native), `WETH`, `USDC` (the chain's
