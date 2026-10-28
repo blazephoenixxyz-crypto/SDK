@@ -145,6 +145,8 @@ eq('scrubUrls hides every URL inside a sentence',
 console.log('registry');
 {
   check('embedded: 2.0.0 is pending everywhere', Object.values(EMBEDDED_DEPLOYMENTS.versions[0].chains).every((c) => /^0x0{40}$/.test(c!.router)));
+  check('embedded: 2.0.0 carries no Ethereum L1 entry', !('1' in EMBEDDED_DEPLOYMENTS.versions.find((v) => v.version === '2.0.0')!.chains));
+  check('embedded: 1.0.0 still lists Ethereum L1', '1' in EMBEDDED_DEPLOYMENTS.versions.find((v) => v.version === '1.0.0')!.chains);
   eq('features 1.0.0', featuresOf('1.0.0').previewAndEncode, false);
   eq('features 2.0.0', featuresOf('2.0.0').previewAndEncode, true);
   check('selector "2" matches 2.0.0', matchesSelector('2.0.0', '2'));
