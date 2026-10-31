@@ -478,6 +478,21 @@ console.log('client · 1.x');
   eq('1.x buildSwap: minOut = netOut − 0.5% (default)', dd.userMinOut, minOutFor(plan.quote.amountOut, 50, plan.quote.preview.effectiveMinOut));
   eq('1.x buildSwap: recipient + deadline', [dd.recipient, dd.deadline], [ME, 2_000_000_000n]);
   check('1.x buildSwap: approval step (allowance 0)', plan.approval?.spender === V1.router && plan.approval.current === 0n && plan.steps.length === 2);
+
+  const { provider: exactProvider } = mockProvider({ exactFor: () => 3_900_000_000n });
+  const exactBlaze = new BlazePhoenix({ rpc: exactProvider, registry: { mode: 'embedded' } });
+  const exactPlan = await exactBlaze.buildSwap({
+    chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true,
+  });
+  eq('1.x exact: fee-netted exactOut and minimum',
+    [exactPlan.exactOut, exactPlan.minOut, decodeSwapExactIn(exactPlan.tx.data).userMinOut],
+    [3_889_080_000n, 3_850_286_427n, 3_850_286_427n]);
+  await throwsCode('1.x exact: userMinOut above the net exact ceiling is refused',
+    () => exactBlaze.buildSwap({
+      chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME,
+      exact: true, userMinOut: 3_875_000_000n,
+    }), 'min_above_exact');
+
   await throwsCode('1.x: native ETH input needs 2.x (wrap first)',
     () => blaze.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 1n, recipient: ME }), 'unsupported_by_version');
   await throwsCode("1.x: mode 'best' needs 2.x",
