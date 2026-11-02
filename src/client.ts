@@ -81,6 +81,12 @@ const HEX_ADDR = /^0x[0-9a-fA-F]{40}$/;
 const INT = /^\d{1,78}$/;
 const UINT128_MAX = (1n << 128n) - 1n;
 
+function netExactOutput(version: string, exactOut: bigint): bigint {
+  return featuresOf(version).previewAndEncode
+    ? exactOut
+    : exactOut - (exactOut * BigInt(FEE_BPS) + 9_999n) / 10_000n;
+}
+
 export type BatchItem =
   | { ok: true; quote: Quote }
   | { ok: false; error: { code: string; message: string } };
@@ -396,12 +402,8 @@ export class BlazePhoenix {
         args: [tIn.address, tOut.address, amountIn],
         ...(req.blockNumber !== undefined ? { blockNumber: req.blockNumber } : {}),
       })) as unknown as [Route, bigint];
-      // 1.x Quoters return the dry-run total GROSS of the protocol fee; 2.x Quoters return it net.
-      // `exactOut` is documented NET, so a 1.x scalar is netted here (rounded up, like the Router's
-      // deduction); `quoterOut` keeps what the Quoter returned.
-      const net = featuresOf(ctx.dep.version).previewAndEncode
-        ? exactOut
-        : exactOut - (exactOut * BigInt(FEE_BPS) + 9_999n) / 10_000n;
+      // `exactOut` is NET; `quoterOut` keeps the scalar exactly as returned.
+      const net = netExactOutput(ctx.dep.version, exactOut);
       return {
         chainId: ctx.chainId, version: ctx.dep.version, tokenIn: tIn.address, tokenOut: tOut.address,
         amountIn, exactOut: net, quoterOut: exactOut, route, quotedAt: Date.now(),
@@ -527,8 +529,8 @@ export class BlazePhoenix {
       if (!samePath(ex[0], route)) {
         throw new BlazeError('calldata_mismatch', 'previewPlanExact priced a different route than the one to execute');
       }
-      exactOut = ex[1];
-      return ex[1];
+      exactOut = netExactOutput(ctx.dep.version, ex[1]);
+      return exactOut;
     };
     // The signed minimum: the caller's userMinOut when one is set, refused when it sits outside
     // the window this read calls plausible; otherwise the floor itself. The floor is the quote

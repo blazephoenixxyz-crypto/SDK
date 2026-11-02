@@ -203,7 +203,7 @@ export interface SwapPlan {
   unwrapAfter: boolean;
   /** Ordered transactions to send: [approval?, swap]. */
   steps: TxRequest[];
-  /** With `exact: true`: the previewPlanExact output minOut was derived from. */
+  /** With `exact: true`: the NET previewPlanExact output used to derive `minOut`. */
   exactOut?: bigint;
 }
 
