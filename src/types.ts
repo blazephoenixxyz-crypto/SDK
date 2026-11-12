@@ -153,6 +153,10 @@ export interface SwapRequest extends QuoteRequest {
   recipient: Address;
   /** The account that will send the swap — enables the allowance check and simulation. */
   from?: Address;
+  /** With `from`: eth_call the built swap from that account before returning it, and fail closed
+   *  (`not_executable`, no plan) on a revert. The Quoter's `canExecute` is swap math; whether these
+   *  bytes settle for the payer is answered only by that call. */
+  simulate?: boolean;
   /** Default 50 (0.5%). minOut = netOut − slippage, never below the on-chain floor. */
   slippageBps?: number;
   /** Seconds from now (default 120, 10–3600) — or pass an absolute `deadline`. */
@@ -188,6 +192,8 @@ export interface ApprovalStep {
 
 export interface SwapPlan {
   quote: Quote;
+  /** Present when built with `simulate: true`: the settled dry-run from `from`. */
+  simulation?: SimulationResult;
   entry: 'swapExactIn' | 'swapExactInNative' | 'swapBestExactIn';
   /** 'quoter': the bytes are the Quoter's own previewAndEncode output (2.x),
    *  verified field-by-field against what you asked; 'sdk': encoded locally. */

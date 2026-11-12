@@ -622,12 +622,25 @@ export class BlazePhoenix {
     }
 
     const quote = this.buildQuote(ctx, tIn, tOut, amountIn, pv, fb);
-    return {
+    const plan: SwapPlan = {
       quote, entry, encodedBy, tx, recipient, minOut, deadline, slippageBps, approval,
       unwrapAfter: tOut.native,
       steps: approval ? [approval.tx, tx] : [tx],
       ...(exactOut !== undefined ? { exactOut } : {}),
     };
+    if (!req.simulate) return plan;
+    // The Quoter's canExecute is swap math: whether these bytes settle for the payer
+    // is answered only by the Router's own call, from the payer. Asked here, it fails closed; a
+    // plan that still needs its approval cannot be asked yet and carries that answer instead.
+    if (!from) throw new BlazeError('bad_request', 'simulate: true needs `from` (the account that will send the swap)');
+    const simulation = await this.simulate(plan, from);
+    if (!simulation.ok && simulation.error?.name !== 'allowance') {
+      const err = simulation.error;
+      throw new BlazeError('not_executable',
+        `the Router refuses these bytes from ${from}: ${err?.name ?? 'revert'}${err?.code !== undefined ? `(${err.code})` : ''} — ${err?.reason ?? 'execution reverted'}`,
+        { details: { from, error: err } });
+    }
+    return { ...plan, simulation };
   }
 
   /** eth_call the swap from `from` on your RPC: the realised amountOut if it
