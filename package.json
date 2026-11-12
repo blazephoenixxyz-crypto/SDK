@@ -52,7 +52,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "tsx scripts/test.ts",
+    "test": "tsx scripts/test.ts && tsx scripts/test-properties.ts",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build",
     "prepublishOnly": "npm run typecheck && npm run build && npm test",
