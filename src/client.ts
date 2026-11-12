@@ -560,7 +560,7 @@ export class BlazePhoenix {
     };
 
     if (features.previewAndEncode && !tIn.native && mode === 'route') {
-      // 2.x: ONE eth_call returns the preview AND the Router calldata that executes it.
+      // 2.x: ONE eth_call returns the preview AND the Router calldata for the route it prices.
       let call: Hex;
       try {
         const r = userMinOut > 0n

@@ -53,7 +53,8 @@ q.amountOut;           // net output after the 0.28% fee (bigint, base units)
 q.checks.verdict;      // Phoenix Check: ok | caution | danger | blocked (fails closed)
 q.version;             // protocol version that answered ('1.0.0' today, '2.0.0' once deployed)
 
-// 2) the swap transaction(s): verified calldata + the approval step if needed
+// 2) the swap transaction(s): calldata verified against the request (swap math; `simulate: true`
+//    asks the Router from `from` whether it settles) + the approval step if needed
 const plan = await blaze.buildSwap({
   chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5',
   recipient: me, from: me,           // `from` enables the allowance check
