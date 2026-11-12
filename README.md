@@ -53,12 +53,14 @@ q.amountOut;           // net output after the 0.28% fee (bigint, base units)
 q.checks.verdict;      // Phoenix Check: ok | caution | danger | blocked (fails closed)
 q.version;             // protocol version that answered ('1.0.0' today, '2.0.0' once deployed)
 
-// 2) the swap transaction(s): verified calldata + the approval step if needed
+// 2) the swap transaction(s): calldata verified against the request (swap math; `simulate: true`
+//    asks the Router from `from` whether it settles) + the approval step if needed
 const plan = await blaze.buildSwap({
   chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1.5',
   recipient: me, from: me,           // `from` enables the allowance check
   slippageBps: 50,                   // default 50; never below the on-chain floor
   exact: true,                       // optional: minOut from previewPlanExact (one more eth_call)
+  simulate: true,                    // optional: eth_call the swap from `from`; a revert throws not_executable
 });
 plan.steps;       // [approve?, swap] — { chainId, to, data, value }
 plan.minOut;      // the minimum the Router will enforce for you
@@ -70,6 +72,12 @@ await blaze.simulate(plan, me);                    // { ok, amountOut } or the d
 const res = await blaze.execute({ wallet, plan }); // approve → simulate → swap → receipt
 res.amountOut;                                     // realised, from the Router's Swap event
 ```
+
+The Quoter's `canExecute` is swap math: it does not see what the tokens do to the payer (a transfer tax,
+a per-account cap, the payer's own balance). Whether the bytes settle is answered only by the Router's own
+call from the account that will send them: `simulate(plan, from)`, `buildSwap({ simulate: true })` or
+`execute`. With `simulate: true` and the approval still missing, no eth_call is made: `plan.simulation` is
+`{ ok: false, error.name: 'allowance' }`; send the approval, then simulate again before the swap.
 
 `execute` takes a viem `WalletClient`. The SDK never asks for, stores or touches a key.
 
@@ -189,7 +197,7 @@ Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; pr
 | `rpc_chain_mismatch` | the node serves a different chain |
 | `rpc_error` | your node failed (network, rate limit) |
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
-| `not_executable` | the Quoter says the route cannot settle now (`canExecute = false`) |
+| `not_executable` | the Quoter's swap math says the route cannot execute now (`canExecute = false`), or, with `simulate: true`, the Router's eth_call from `from` reverts |
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
 | `min_implausible` | `buildSwap`: `userMinOut` below the quote net of `slippageBps` (or the on-chain floor) |
 | `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut` above `exactOut` less the 50 bps safety margin |

@@ -12,7 +12,8 @@ console.log('amountOut (USDC):', fromBaseUnits(q.amountOut, 6));
 console.log('impact (bps):', q.checks.priceImpact.bps, '| est gas:', q.preview.estGas);
 console.log('route hops:', q.route.hops.length, '| Phoenix Check:', q.checks.verdict);
 
-// Build the swap for your address — verified calldata, approval step included.
+// Build the swap for your address — calldata verified against the request (swap math), approval
+// step included. Pass `simulate: true` to ask the Router from `from` whether it settles.
 const me = process.env.ME as `0x${string}` | undefined;
 if (me) {
   const plan = await blaze.buildSwap({
