@@ -127,9 +127,10 @@ export class Registry {
   async refresh(force = false): Promise<void> {
     if (this.mode !== 'auto' || !this.fetchFn) return;
     if (!force && this.fetchedAt && Date.now() - this.fetchedAt < this.ttlMs) return;
-    // Concurrent refreshes of the same URL (several clients in one process)
-    // share ONE download — but every instance merges the document into its
-    // OWN state. (Sharing the merge too would leave the followers stale.)
+    // Concurrent refreshes of the same URL through the same fetch (several
+    // clients in one process) share ONE download — but every instance merges
+    // the document into its OWN state. (Sharing the merge too would leave the
+    // followers stale.) Another fetch asks its own channel.
     try {
       const raw = await singleflight(`registry ${this.url}`, async () => {
         const res = await resilientFetch(this.fetchFn!, this.url, { headers: { accept: 'application/json' } }, {
@@ -140,7 +141,7 @@ export class Registry {
         // The site wraps nothing today, but accept { registry: … } too.
         return body && typeof body === 'object' && 'registry' in (body as object)
           ? (body as { registry: unknown }).registry : body;
-      });
+      }, this.fetchFn);
       this.merge(raw);
       this.lastError = undefined;
     } catch (e) {

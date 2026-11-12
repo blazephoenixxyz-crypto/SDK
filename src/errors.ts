@@ -36,6 +36,7 @@ export type BlazeErrorCode =
   | 'no_route'
   | 'not_executable'
   | 'calldata_mismatch'
+  | 'plan_mismatch'
   | 'min_implausible'
   | 'min_above_exact'
   | 'deployment_unverified'

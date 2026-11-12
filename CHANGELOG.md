@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- `quote`: the preview cache and the sharing of identical in-flight reads are per client. Two
+  clients in one process on two nodes are each answered by their own node; before, the second
+  could get the first one's answer for up to `cacheTtlMs`. Every call returns its own copy of
+  the quote, so mutating one never reaches another caller. The registry shares one download
+  only between instances that use the same `fetch`.
+- BZPX: coming soon. `CHAINS[*].bzpx` is unset on every chain, and the `BZPX` symbol is refused
+  with `bad_request` ("BZPX: coming soon — the token address is not published yet; pass a token
+  address") before any RPC call. The address listed under 1.2.0 below is withdrawn; do not use it.
+- Proof-of-solvency: coming soon. `solvency()` keeps failing with `not_deployed` while no staking
+  engine is registered.
+- Examples: the bots default to USDC and refuse `BZPX` by ticker.
+- New `verifyPlan(plan, expectation)` (pure) and `blaze.verifyPlan(plan, request?, signer?)`: decode
+  `plan.tx.data` and `plan.approval.tx.data` and compare chain, Router (the deployment this SDK
+  resolves, not the plan's), function, tokens, amount, value, recipient, deadline and minimum
+  with what was asked, and the approval's token, spender and amount. The calldata must be the
+  canonical encoding of the call it decodes to. Any difference throws the new `plan_mismatch`.
+  `blaze.verifyPlan` floors the minimum with a quote it reads on your RPC (net of your slippage
+  for the drift and again for the swap, never under the Quoter's on-chain floor), not with the
+  plan's own quote; no measured quote refuses the plan.
+- `execute` runs it before any transaction, and again on a plan it rebuilds. With `request`, a
+  plan built for another request is now refused instead of signed.
+- `execute({ plan })` without `request` is stricter: the recipient must be your wallet's account,
+  the approval exact, the deadline within the client's `deadlineSec`, and the minimum is floored
+  with the client's `slippageBps` (the plan's own `slippageBps` is not used). `execute` signs a copy
+  of the plan taken when it is called; a plan that is not plain data (getters, a Proxy, a class
+  instance, bigints as strings) throws `bad_request`.
+- `buildSwap`: `plan.minOut` is the minimum actually signed when the Quoter encoded a higher one.
+
 ## 1.2.1 — one meaning per field
 
 - `quoteExact`: `exactOut` is net of the protocol fee on every Quoter. A 1.x Quoter returns the
