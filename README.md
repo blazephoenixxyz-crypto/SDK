@@ -15,7 +15,7 @@ npm i @blazephoenix/sdk viem
 
 ## BlazePhoenix in one sentence
 
-BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine that proves its own solvency on every transaction. V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
+BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine (coming soon) that proves its own solvency on every transaction. V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
 
 **Swap** in the [app](https://blazephoenix.xyz/?tab=swap) · **integrate** with the [SDK](https://github.com/blazephoenixxyz-crypto/SDK) (`npm i @blazephoenix/sdk`) · **connect an agent** to the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) (`https://blazephoenix.xyz/mcp`, no key)
 
@@ -173,7 +173,7 @@ await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, er
 await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
 const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
 await blaze.tokenInfo('base', '0x…');  // symbol / name / decimals
-await blaze.solvency();                // staking proof-of-solvency; `not_deployed` where no engine is registered
+await blaze.solvency();                // proof-of-solvency: coming soon; `not_deployed` until an engine is registered
 toJSON(quote);                         // bigint → string, for HTTP / queues / LLMs
 ```
 
@@ -183,7 +183,8 @@ Pure helpers (no RPC): `buildApproveTx`, `buildWrapTx`, `buildUnwrapTx`, `permit
 `decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`.
 
 Tokens: `0x` addresses, or the universal symbols `ETH` (native), `WETH`, `USDC` (the chain's
-dollar asset — USDG on Robinhood), `BZPX`. Anything else: pass the address. The SDK never
+dollar asset — USDG on Robinhood). BZPX: coming soon — its address is not published yet, so the
+symbol is refused. Anything else: pass the address. The SDK never
 guesses a token from a ticker.
 
 ## Errors

@@ -7,6 +7,12 @@
   could get the first one's answer for up to `cacheTtlMs`. Every call returns its own copy of
   the quote, so mutating one never reaches another caller. The registry shares one download
   only between instances that use the same `fetch`.
+- BZPX: coming soon. `CHAINS[*].bzpx` is unset on every chain, and the `BZPX` symbol is refused
+  with `bad_request` ("BZPX: coming soon — the token address is not published yet; pass a token
+  address") before any RPC call. The address listed under 1.2.0 below is withdrawn; do not use it.
+- Proof-of-solvency: coming soon. `solvency()` keeps failing with `not_deployed` while no staking
+  engine is registered.
+- Examples: the bots default to USDC and refuse `BZPX` by ticker.
 
 ## 1.2.1 — one meaning per field
 

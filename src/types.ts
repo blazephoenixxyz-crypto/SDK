@@ -11,7 +11,8 @@ export type Hex = `0x${string}`;
 export type ChainRef = number | string;
 
 /** Token selector: 0x-address, or one of the universal symbols every chain
- *  carries: ETH (native), WETH, USDC (the chain's dollar asset), BZPX (Base).
+ *  carries: ETH (native), WETH, USDC (the chain's dollar asset). BZPX: coming soon (its
+ *  address is not published yet, so the symbol is refused).
  *  Everything else: pass the 0x address — the SDK never guesses a token. */
 export type TokenRef = string;
 

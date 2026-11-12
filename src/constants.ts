@@ -27,6 +27,7 @@ export interface ChainInfo {
   weth: `0x${string}`;
   /** The chain's canonical dollar asset (USDG on Robinhood Chain). */
   usdc: `0x${string}`;
+  /** BZPX token. Unset everywhere: BZPX is coming soon and its address is not published yet. */
   bzpx?: `0x${string}`;
   /** BlazePhoenix staking engine, where live. */
   staking?: `0x${string}`;
@@ -51,7 +52,6 @@ export const CHAINS: Record<SupportedChainId, ChainInfo> = {
     explorer: 'https://basescan.org',
     weth: '0x4200000000000000000000000000000000000006',
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    bzpx: '0x053D75c00FdD571538492e3B1686Bd963a0911A7',
     blockTime: 2,
   },
   10: {

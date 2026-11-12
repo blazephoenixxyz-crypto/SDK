@@ -78,7 +78,16 @@ eq('arbitrum-one', resolveChain('arbitrum-one'), 42161);
 eq('robinhood numeric', resolveChain('4663'), 4663);
 check('unknown chain throws', (() => { try { resolveChain('solana'); return false; } catch { return true; } })());
 eq('robinhood dollar asset is USDG', CHAINS[4663].usdc, '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
-eq('base BZPX is the current token', CHAINS[8453].bzpx, '0x053D75c00FdD571538492e3B1686Bd963a0911A7');
+check('BZPX: coming soon — no chain carries a BZPX address', Object.values(CHAINS).every((c) => c.bzpx === undefined));
+{
+  // Mutant: put any address back in CHAINS[*].bzpx or a `bzpx: '0x…'` / BZPX_* constant in src → red.
+  const src = readdirSync('src').filter((f) => f.endsWith('.ts'))
+    .map((f) => readFileSync(join('src', f), 'utf8')).join('\n');
+  const assigned = src.match(/\bbzpx\w*\s*[:=]\s*['"`]?0x[0-9a-fA-F]{40}/i);
+  check('BZPX: coming soon — no BZPX address is assigned anywhere in src', assigned === null, assigned?.[0]);
+  check('BZPX: coming soon — the last published BZPX address is gone from src',
+    !src.toLowerCase().includes('0x05' + '3d75c00fdd571538492e3b1686bd963a0911a7')); // split: no address literal
+}
 check('no staking engine pinned on any chain', Object.values(CHAINS).every((c) => c.staking === undefined));
 eq('fee bps', FEE_BPS, 28);
 
@@ -625,6 +634,21 @@ console.log('client · 2.x');
   await throwsCode('2.x native: userMinOut below the quote net of slippage is refused',
     () => blaze.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, userMinOut: 1n }), 'min_implausible');
   await throwsCode('solvency on Base: no staking engine pinned', () => blaze.solvency('base'), 'not_deployed');
+  // BZPX: coming soon. The symbol fails closed on every chain and side, before any RPC call.
+  // Mutant: restore `if (c.bzpx) return …` with an address in CHAINS → red.
+  for (const [chain, side] of [['base', 'tokenOut'], ['base', 'tokenIn']] as const) {
+    const before = calls.length;
+    const req = side === 'tokenOut'
+      ? { chain, tokenIn: 'WETH', tokenOut: 'bzpx', amountIn: 10n ** 18n }
+      : { chain, tokenIn: ' BZPX ', tokenOut: 'WETH', amountIn: 10n ** 18n };
+    try { await blaze.quote(req); check(`BZPX: coming soon (${chain} ${side})`, false, 'did not throw'); }
+    catch (e) {
+      const msg = String((e as Error)?.message);
+      check(`BZPX: coming soon (${chain} ${side}) — bad_request with the coming-soon message, no RPC call`,
+        e instanceof BlazeError && e.code === 'bad_request' && msg.includes('BZPX: coming soon') && msg.includes('pass a token address')
+          && calls.length === before, `${(e as BlazeError)?.code ?? ''} ${msg}`);
+    }
+  }
   const lowSlip = await blaze.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, userMinOut: 2_950_000_000n, slippageBps: 200 });
   eq('2.x userMinOut accepted once slippageBps admits it', lowSlip.minOut, 2_950_000_000n);
 
@@ -865,7 +889,7 @@ console.log('misc');
   const slow = () => new Promise<number>((r) => { calls++; setTimeout(() => r(7), 10); });
   const [a, b] = await Promise.all([singleflight('k', slow), singleflight('k', slow)]);
   check('singleflight shares one execution', a === 7 && b === 7 && calls === 1);
-  eq('deep link', deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'BZPX', amount: '0.5' }), 'https://blazephoenix.xyz/?tab=swap&chain=8453&in=ETH&out=BZPX&amt=0.5');
+  eq('deep link', deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amount: '0.5' }), 'https://blazephoenix.xyz/?tab=swap&chain=8453&in=ETH&out=USDC&amt=0.5');
 }
 
 console.log(`\n${failed === 0 ? '✅' : '❌'} ${passed} passed, ${failed} failed\n`);

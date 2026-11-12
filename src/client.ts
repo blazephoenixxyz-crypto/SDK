@@ -252,13 +252,14 @@ export class BlazePhoenix {
       case 'USDC': case 'USDG':
         if (s.toUpperCase() === (chainId === 4663 ? 'USDG' : 'USDC')) return { address: c.usdc, native: false };
         break;
+      // BZPX: coming soon. No address is published, so the symbol fails closed.
       case 'BZPX':
-        if (c.bzpx) return { address: c.bzpx, native: false };
-        break;
+        throw new BlazeError('bad_request',
+          `${side}: BZPX: coming soon — the token address is not published yet; pass a token address`);
       default: break;
     }
     throw new BlazeError('bad_request',
-      `${side}: "${ref}" is not a 0x address or a built-in symbol (ETH, WETH, ${chainId === 4663 ? 'USDG' : 'USDC'}, BZPX) on ${c.name} — pass the token address`);
+      `${side}: "${ref}" is not a 0x address or a built-in symbol (ETH, WETH, ${chainId === 4663 ? 'USDG' : 'USDC'}) on ${c.name} — pass the token address`);
   }
 
   private async decimalsOf(client: PublicClient, chainId: number, t: ResolvedToken): Promise<number> {
@@ -757,7 +758,8 @@ export class BlazePhoenix {
     }
   }
 
-  /** The staking engine's live proof-of-solvency (Base), read on your RPC. */
+  /** Staking proof-of-solvency: coming soon. Fails with `not_deployed` until a staking engine is
+   *  registered; once one is, it is read on your RPC. */
   async solvency(chain: string | number = 8453): Promise<SolvencyReport> {
     const chainId = resolveChain(chain);
     const staking = CHAINS[chainId].staking;
