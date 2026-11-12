@@ -34,6 +34,7 @@ export {
   verifySwapExactIn, tightenMinOut, minOutFor, routeFingerprint,
   type DecodedSwapExactIn, type SwapExpectation,
 } from './calldata.js';
+export { verifyPlan, type PlanExpectation, type VerifiedPlan } from './verify.js';
 export { phoenixCheck, routeIsConsistent, HARD_IMPACT_BPS, CAUTION_IMPACT_BPS } from './checks.js';
 export {
   BlazeError, decodeBlazeError, decodeRevertData, describeProtocolError,

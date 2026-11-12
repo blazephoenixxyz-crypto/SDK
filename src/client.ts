@@ -21,7 +21,7 @@ import {
   ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI, STAKING_SOLVENCY_ABI,
 } from './abis.js';
 import {
-  encodeSwapBestExactIn, encodeSwapExactIn, encodeSwapExactInNative, minOutFor, tightenMinOut,
+  decodeSwapExactIn, encodeSwapBestExactIn, encodeSwapExactIn, encodeSwapExactInNative, minOutFor, tightenMinOut,
   verifySwapExactIn,
 } from './calldata.js';
 import { phoenixCheck, routeIsConsistent } from './checks.js';
@@ -35,6 +35,7 @@ import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
 } from './registry.js';
 import { memGet, memPut, singleflight } from './resilience.js';
+import { snapshotPlan, verifyPlan, type PlanExpectation, type VerifiedPlan } from './verify.js';
 import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions, scrubUrls } from './rpc.js';
 import type {
   Address, ApprovalStep, ExactQuote, Fill, Hex, Preview, Quote, QuoteRequest, Route,
@@ -586,6 +587,7 @@ export class BlazePhoenix {
         minOutAtLeast: pv.effectiveMinOut, route: pv.route,
       });
       data = tightenMinOut(call, minOut);
+      minOut = decodeSwapExactIn(data).userMinOut; // the minimum actually signed (the Quoter may encode a higher one)
       encodedBy = 'quoter';
       entry = 'swapExactIn';
     } else {
@@ -667,6 +669,73 @@ export class BlazePhoenix {
   }
 
   /**
+   * Re-check a plan's bytes before signing (pure verifyPlan, after resolving the expectation
+   * on YOUR side): the Router of the deployment this SDK resolves, the tokens, amount, recipient,
+   * deadline and slippage of `request`. Without `request` nothing that sets where the output goes
+   * or how low it may go comes from the plan: the recipient must be `signer` (execute() passes your
+   * wallet's account; without `request` and `signer` the plan is refused with `bad_request`), the
+   * approval must be exact to this Router, the deadline within this client's `deadlineSec`, and the
+   * slippage is this client's `slippageBps`; only the pair and the size are the plan's, and the
+   * chain (execute pins it to the wallet's). Either way the minimum is checked against a quote
+   * measured here, on YOUR RPC (one eth_call), never against the plan's own quote alone. The plan
+   * is copied once, as plain data, before any check (`bad_request` when it is not plain data).
+   * Throws `plan_mismatch` naming the failed fields (or the RPC's error: no measurement, no
+   * acceptance). execute() calls it before any transaction.
+   */
+  async verifyPlan(plan: SwapPlan, request?: SwapRequest, signer?: Address): Promise<VerifiedPlan> {
+    return this.verifySnapshot(snapshotPlan(plan), request, signer);
+  }
+
+  private async verifySnapshot(plan: SwapPlan, request: SwapRequest | undefined, signer: Address | undefined): Promise<VerifiedPlan> {
+    let want: PlanExpectation;
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (request) {
+      const ctx = await this.ctx(request);
+      const { tIn, tOut, amountIn, userMinOut } = await this.pair(ctx, request);
+      if (!request.recipient || !HEX_ADDR.test(request.recipient)) throw new BlazeError('bad_request', 'recipient must be a 0x address');
+      const floor = await this.measuredFloor(ctx, plan, tIn.address, tOut.address, amountIn, request.slippageBps ?? this.slippageBps);
+      want = {
+        chainId: ctx.chainId, router: ctx.dep.contracts.router, tokenIn: tIn.address, tokenOut: tOut.address,
+        nativeIn: tIn.native, amountIn, recipient: getAddress(request.recipient), minOutAtLeast: maxBig(floor, userMinOut),
+        ...(request.deadline !== undefined ? { deadline: request.deadline }
+          : { maxDeadline: nowSec + BigInt(checkDeadlineSec(request.deadlineSec ?? this.deadlineSec)) }),
+        approve: request.approve === 'max' ? 'max' : 'exact',
+      };
+    } else {
+      if (typeof signer !== 'string' || !HEX_ADDR.test(signer)) {
+        throw new BlazeError('bad_request', 'without `request` a plan can only be checked against the account that signs it — pass `request` (execute() passes your wallet\'s account)');
+      }
+      const ctx = await this.ctx({ chain: plan.tx.chainId });
+      const q = plan.quote;
+      want = {
+        chainId: ctx.chainId, router: ctx.dep.contracts.router, tokenIn: q.tokenIn, tokenOut: q.tokenOut,
+        nativeIn: q.nativeIn, amountIn: q.amountIn, recipient: getAddress(signer),
+        minOutAtLeast: await this.measuredFloor(ctx, plan, q.tokenIn, q.tokenOut, q.amountIn, this.slippageBps),
+        maxDeadline: nowSec + BigInt(this.deadlineSec), approve: 'exact',
+      };
+    }
+    return verifyPlan(plan, want);
+  }
+
+  /**
+   * The least minimum a plan may sign for this pair and size. The plan's quote is a claim: it can
+   * only raise the floor. The floor it cannot go under is measured here — one preview on YOUR RPC,
+   * net of `slippageBps` for the drift since the plan was quoted and again for the swap, never
+   * under the Quoter's on-chain floor. No measurement is not a floor of 0: a failed read throws,
+   * and a preview with no executable output refuses the plan.
+   */
+  private async measuredFloor(ctx: Ctx, plan: SwapPlan, tIn: Address, tOut: Address, amountIn: bigint, slippageBps: number): Promise<bigint> {
+    const claimed = minOutFor(plan.quote.amountOut, slippageBps, plan.quote.preview.ironFloor);
+    const { pv } = await this.readPreview(ctx, tIn, tOut, amountIn, 0n);
+    if (!pv.canExecute || pv.netOut <= 0n || !routeIsConsistent(pv.route, tIn, tOut)) {
+      const m = `no measured quote on your RPC (netOut ${pv.netOut}, canExecute ${pv.canExecute}): the minimum cannot be checked`;
+      throw new BlazeError('plan_mismatch', `plan refused — ${m}`, { details: { fields: ['minOut'], mismatches: [m] } });
+    }
+    const measured = minOutFor(minOutFor(pv.netOut, slippageBps, 0n), slippageBps, pv.ironFloor);
+    return maxBig(claimed, measured);
+  }
+
+  /**
    * Execute with YOUR wallet: approve when needed (exact amount by default),
    * simulate, send the swap, and read the realised output from the receipt.
    * The SDK never holds or asks for a key — the WalletClient signs.
@@ -675,7 +744,8 @@ export class BlazePhoenix {
     const { wallet } = opts;
     const account = wallet.account;
     if (!account) throw new BlazeError('bad_request', 'wallet has no account — create the WalletClient with an account');
-    let plan = opts.plan;
+    // Verified, simulated and signed: this copy only. The caller's object is never read again.
+    let plan = opts.plan === undefined ? undefined : snapshotPlan(opts.plan);
     const req = opts.request;
     const maxAge = opts.maxQuoteAgeMs ?? 30_000;
     if (!plan) {
@@ -685,6 +755,7 @@ export class BlazePhoenix {
       if (!req) throw new BlazeError('bad_request', `plan is older than ${maxAge}ms — pass \`request\` so it can be rebuilt, or rebuild it yourself`);
       plan = await this.buildSwap({ ...req, from: req.from ?? account.address });
     }
+    await this.verifySnapshot(plan, req, account.address);
     const walletChain = await wallet.getChainId();
     if (walletChain !== plan.tx.chainId) {
       throw new BlazeError('wallet_chain_mismatch', `wallet is on chain ${walletChain}, the swap is on ${plan.tx.chainId} — switch the wallet first`);
@@ -715,6 +786,7 @@ export class BlazePhoenix {
             + `${approvalHash ? ` (${approvalHash})` : ''} — the swap was NOT sent; rebuild the plan, or pass \`request\` so it can be rebuilt`);
         }
         plan = await this.buildSwap({ ...req, from: req.from ?? account.address });
+        await this.verifySnapshot(plan, req, account.address);
       }
     }
     if (opts.simulate ?? true) {

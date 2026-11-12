@@ -82,6 +82,20 @@ call from the account that will send them: `simulate(plan, from)`, `buildSwap({ 
 
 `execute` takes a viem `WalletClient`. The SDK never asks for, stores or touches a key.
 
+A plan is a plain object and may have crossed a process, a queue or an LLM before it is signed.
+`execute` re-checks it from its bytes before any transaction (`blaze.verifyPlan(plan, request?, signer?)`,
+or the pure `verifyPlan(plan, expectation)`): Router of the deployment this SDK resolves, function,
+tokens, amount, value, recipient, deadline, a minimum at least what your slippage implies, the
+approval's token, spender and amount, and canonical calldata. The minimum is checked against a
+quote `blaze.verifyPlan` measures on your RPC (one eth_call; it allows your slippage once for the
+price moving since the plan was quoted), never against the plan's own quote; if that read fails or
+finds no executable route, the plan is refused. Pass `request` to check against what you asked
+for. Without it, only the pair and the size are the plan's: the recipient must be the signer
+(`execute` passes your wallet's account), the approval exact, the deadline within this client's
+`deadlineSec` and the slippage this client's `slippageBps`. `execute` verifies, simulates and signs
+one copy of the plan, taken when it is called; a plan that is not plain data (getters, a Proxy, a
+class instance, bigints as strings after JSON) is refused with `bad_request`.
+
 ## Your RPC, your way
 
 ```ts
@@ -201,6 +215,7 @@ Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; pr
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
 | `not_executable` | the Quoter's swap math says the route cannot execute now (`canExecute = false`), or, with `simulate: true`, the Router's eth_call from `from` reverts |
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
+| `plan_mismatch` | `verifyPlan` / `execute`: the plan's bytes do not execute what you asked for (`details.fields` names each field) — nothing was sent |
 | `min_implausible` | `buildSwap`: `userMinOut` below the quote net of `slippageBps` (or the on-chain floor) |
 | `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut` above `exactOut` less the 50 bps safety margin |
 | `deployment_unverified` | a registry deployment failed on-chain verification |
