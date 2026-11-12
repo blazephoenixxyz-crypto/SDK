@@ -16,7 +16,8 @@ import { routeIsConsistent } from '../src/checks.js';
 import { BlazePhoenix } from '../src/client.js';
 import { fromBaseUnits, toBaseUnits } from '../src/erc20.js';
 import { BlazeError, untrustedText } from '../src/errors.js';
-import { __resetResilience, memGet, memPut } from '../src/resilience.js';
+import { Registry } from '../src/registry.js';
+import { __resetResilience, memGet, memPut, singleflight } from '../src/resilience.js';
 import { isAllowedRpcUrl, redact, scrubUrls } from '../src/rpc.js';
 import type { Address, Hex, Route } from '../src/types.js';
 import {
@@ -399,6 +400,135 @@ console.log('client · cache keys');
   for (let i = 0; i < 600; i++) memPut(`b${i}`, i, 2_000);
   check('cache: bounded — the oldest entries are evicted, the newest stay',
     memGet('k', 1e9, 2_000) === undefined && memGet('b0', 1e9, 2_000) === undefined && memGet('b599', 1e9, 2_000) === 599 && memGet('b100', 1e9, 2_000) === 100);
+  __resetResilience();
+}
+
+// ── one client, one cache (atq:PER-6): no answer crosses from one instance to another ──
+// Red at d326e1e: the quote cache and the in-flight map were process-wide, keyed by the
+// request alone, so a second client on another node was answered by the first one's node.
+console.log('client · one instance, one cache');
+{
+  const net = (g: bigint) => g - (g * 28n + 9_999n) / 10_000n;   // mkPreview's fee as a literal: the oracle is each node, not the client
+  const outOf = (i: number) => (a: bigint) => a / BigInt(i + 2) + BigInt(i) + 1n;
+  const reads = (n: ReturnType<typeof mockNode>) => n.count('previewPlan') + n.count('previewPlanWithMinOut');
+  const fleet = (k: number, ttl: number) => Array.from({ length: k }, (_, i) => {
+    const n = mockNode({ outFor: outOf(i) });
+    return { n, b: new BlazePhoenix({ rpc: n.provider, registry: { mode: 'embedded' }, cacheTtlMs: ttl }), want: (a: bigint) => net(outOf(i)(a)) };
+  });
+  const REQ = { chain: 'base', tokenIn: WETH, tokenOut: USDC } as const;
+  const AMOUNTS = [10n ** 6n, 10n ** 18n, 2n ** 128n - 1n];
+  const BIG = 10n ** 18n;
+  type Q = Awaited<ReturnType<BlazePhoenix['quote']>>;
+  const spoil = (q: Q) => { q.amountOut = 1n; q.preview.netOut = 1n; (q.route.hops as unknown[]).length = 0; };
+
+  const seq: string[] = [];
+  for (const ttl of [1_000, 60_000]) for (const amt of AMOUNTS) {
+    __resetResilience();
+    for (const [i, c] of fleet(3, ttl).entries()) {
+      const q = await c.b.quote({ ...REQ, amountIn: amt });
+      if (q.amountOut !== c.want(amt) || reads(c.n) !== 1) seq.push(`ttl ${ttl} amountIn ${amt} client ${i}: answered ${q.amountOut}, its node ${c.want(amt)}, reads ${reads(c.n)}`);
+    }
+  }
+  check('scope: clients on different nodes one after the other are each answered by their own node (cache; ttl 1 s, 60 s × amountIn 1e6, 1e18, 2^128-1 × 3 clients)', seq.length === 0, seq.join('; '));
+
+  const par: string[] = [];
+  for (const ttl of [0, 60_000]) for (const k of [2, 5]) {
+    __resetResilience();
+    const f = fleet(k, ttl);
+    for (const [i, c] of f.entries()) await c.b.quote({ ...REQ, amountIn: 7n + BigInt(i) });   // every node verified, nothing shared yet
+    const before = f.map((c) => reads(c.n));
+    const qs = await Promise.all(f.map((c) => c.b.quote({ ...REQ, amountIn: BIG })));
+    qs.forEach((q, i) => {
+      if (q.amountOut !== f[i].want(BIG) || reads(f[i].n) !== before[i] + 1) par.push(`ttl ${ttl} clients ${k} client ${i}: answered ${q.amountOut}, its node ${f[i].want(BIG)}, reads ${reads(f[i].n) - before[i]}`);
+    });
+  }
+  check('scope: clients on different nodes asking at the same time are each answered by their own node (in-flight; ttl 0, 60 s × 2, 5 clients)', par.length === 0, par.join('; '));
+
+  {
+    __resetResilience();
+    const [c] = fleet(1, 0);
+    await c.b.quote({ ...REQ, amountIn: 7n });
+    const before = reads(c.n);
+    const qs = await Promise.all([1, 2, 3, 4].map(() => c.b.quote({ ...REQ, amountIn: BIG })));
+    check('scope: one client asking the same request four times at once reads its node once', reads(c.n) === before + 1 && qs.every((q) => q.amountOut === c.want(BIG)), `reads ${reads(c.n) - before}`);
+  }
+
+  {
+    __resetResilience();
+    const [c] = fleet(1, 60_000);
+    const req = { ...REQ, amountIn: BIG };
+    const q1 = await c.b.quote(req);
+    const want = canon(q1);
+    spoil(q1);
+    const q2 = await c.b.quote(req);
+    const second = canon(q2) === want;
+    spoil(q2);
+    const q3 = await c.b.quote(req);
+    check('copy: every quote answered from the cache is the caller\'s own object (mutating one never reaches the next)', reads(c.n) === 1 && second && canon(q3) === want,
+      `reads ${reads(c.n)}; second intact ${second}; third intact ${canon(q3) === want}`);
+    __resetResilience();
+    const [d] = fleet(1, 0);
+    await d.b.quote({ ...REQ, amountIn: 7n });
+    const before = reads(d.n);
+    const [qa, qb] = await Promise.all([d.b.quote(req), d.b.quote(req)]);
+    const wantB = canon(qb);
+    spoil(qa);
+    check('copy: two callers sharing one read get two objects (mutating one never reaches the other)', reads(d.n) === before + 1 && qa !== qb && canon(qb) === wantB,
+      `reads ${reads(d.n) - before}; same object ${qa === qb}; other intact ${canon(qb) === wantB}`);
+  }
+
+  {
+    // A caller that writes the process-wide cache directly (singleflight and the cache are exported):
+    // the key a client used before the fix, exactly.
+    const OLD = `Q|8453|1.0.0|${V1.quoter}|${WETH}|false|${USDC}|false|${BIG}|0|`;
+    __resetResilience();
+    const [c] = fleet(1, 60_000);
+    memPut(OLD, { amountOut: 1n });
+    const q = await c.b.quote({ ...REQ, amountIn: BIG });
+    check('scope: a value another caller put in the shared cache under the client\'s own key is never served', q.amountOut === c.want(BIG) && reads(c.n) === 1,
+      `answered ${q.amountOut}, its node ${c.want(BIG)}, reads ${reads(c.n)}`);
+    __resetResilience();
+    const [d] = fleet(1, 0);
+    await d.b.quote({ ...REQ, amountIn: 7n });
+    const lie = singleflight(OLD, () => new Promise((r) => setTimeout(() => r({ amountOut: 1n }), 50)));
+    const q2 = await d.b.quote({ ...REQ, amountIn: BIG });
+    await lie;
+    check('scope: a slow call another caller started in singleflight under the client\'s own key is never joined', q2.amountOut === d.want(BIG),
+      `answered ${q2.amountOut}, its node ${d.want(BIG)}`);
+  }
+
+  {
+    __resetResilience();
+    const req = { ...REQ, amountIn: BIG };
+    const [c] = fleet(1, 60_000);
+    await c.b.quote(req);
+    __resetResilience();
+    await c.b.quote(req);
+    check('scope: __resetResilience clears the cache of a live client', reads(c.n) === 2, `reads ${reads(c.n)}`);
+    const [d] = fleet(1, 0);
+    await d.b.quote(req);
+    await d.b.quote(req);
+    check('cache: cacheTtlMs 0 reads the node on every request', reads(d.n) === 2, `reads ${reads(d.n)}`);
+  }
+  __resetResilience();
+}
+
+console.log('registry · one download per fetch');
+{
+  const URL_R = 'https://registry.invalid/deployments.json';
+  const fetcher = (tag: string, log: string[]) => (async () => {
+    log.push(tag);
+    await new Promise((r) => setTimeout(r, 20));
+    return new Response(JSON.stringify({ schema: 1, versions: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  __resetResilience();
+  const log: string[] = [];
+  await Promise.all([new Registry({ url: URL_R, fetchFn: fetcher('A', log) }).refresh(true), new Registry({ url: URL_R, fetchFn: fetcher('B', log) }).refresh(true)]);
+  check('registry: two instances with their own fetch, same URL, at the same time: each asks its own fetch', [...log].sort().join() === 'A,B', log.join());
+  log.length = 0;
+  const f = fetcher('S', log);
+  await Promise.all([new Registry({ url: URL_R, fetchFn: f }).refresh(true), new Registry({ url: URL_R, fetchFn: f }).refresh(true)]);
+  check('registry: two instances sharing one fetch, same URL, at the same time: one download', log.join() === 'S', log.join());
   __resetResilience();
 }
 

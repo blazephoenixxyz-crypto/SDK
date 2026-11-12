@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `quote`: the preview cache and the sharing of identical in-flight reads are per client. Two
+  clients in one process on two nodes are each answered by their own node; before, the second
+  could get the first one's answer for up to `cacheTtlMs`. Every call returns its own copy of
+  the quote, so mutating one never reaches another caller. The registry shares one download
+  only between instances that use the same `fetch`.
+
 ## 1.2.1 — one meaning per field
 
 - `quoteExact`: `exactOut` is net of the protocol fee on every Quoter. A 1.x Quoter returns the

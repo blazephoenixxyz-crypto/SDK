@@ -15,7 +15,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const SUITE = ['npx', 'tsx', 'scripts/test-properties.ts'];
-const F = { cal: 'src/calldata.ts', chk: 'src/checks.ts', erc: 'src/erc20.ts', err: 'src/errors.ts', rpc: 'src/rpc.ts', cli: 'src/client.ts', res: 'src/resilience.ts' };
+const F = { cal: 'src/calldata.ts', chk: 'src/checks.ts', erc: 'src/erc20.ts', err: 'src/errors.ts', rpc: 'src/rpc.ts', cli: 'src/client.ts', res: 'src/resilience.ts', reg: 'src/registry.ts' };
+const CACHE = ((t) => t.slice(t.indexOf('memGet(key, this.cacheTtlMs, undefined, this)'), t.indexOf('memPut(key, q, undefined, this)') + 31))(readFileSync(F.cli, 'utf8'));
 const guard = (cond) => [`if (${cond}) bad.push`, 'if (false) bad.push'];
 const FAULTS = ['quote', 'quoteExact', 'buildSwap', 'tokenInfo', 'getFills'].map((e) => `faults: ${e} fails as a BlazeError`);
 
@@ -83,7 +84,7 @@ const M = [
   [F.cli, 'if (v > UINT128_MAX) throw', 'if (false) throw', 'amounts: amountIn that is zero, above uint128'],
   [F.cli, 'if (v <= 0n) throw', 'if (v < 0n) throw', 'amounts: amountIn that is zero, above uint128'],
   [F.cli, "if (typeof req.userMinOut !== 'bigint' && !INT.test(s)) throw", 'if (false) throw', 'amounts: a userMinOut string'],
-  [F.cli, 'if (hit) return hit;', 'if (false) return hit;', 'cache: the identical request is answered from the cache'],
+  [F.cli, 'if (hit) return structuredClone(hit);', 'if (false) return structuredClone(hit);', 'cache: the identical request is answered from the cache'],
   [F.cli, '|${amountIn}|${userMinOut}|${req.blockNumber', '|${userMinOut}|${req.blockNumber', 'cache: another amountIn'],
   [F.cli, '|${amountIn}|${userMinOut}|${req.blockNumber', '|${amountIn}|${req.blockNumber', 'cache: another userMinOut'],
   [F.cli, '|${tIn.address}|${tIn.native}|${tOut.address}', '|${tIn.native}|${tOut.address}', 'cache: another tokenIn'],
@@ -97,7 +98,21 @@ const M = [
     { also: [[F.rpc, 'your RPC did not answer eth_chainId: ${scrubUrls(String((e as Error)?.message ?? e))}', 'your RPC did not answer eth_chainId: ${String((e as Error)?.message ?? e)}']] }],
 
   [F.res, 'now - hit.at < ttlMs', 'now - hit.at <= ttlMs', 'cache: an entry lives strictly less'],
-  [F.res, 'if (MEM.size > 500) {', 'if (MEM.size > 5000) {', 'cache: bounded'],
+  [F.res, 'if (mem.size > 500) {', 'if (mem.size > 5000) {', 'cache: bounded'],
+  // fin-1111: 4193 / atq:PER-6, the cache and the in-flight sharing are per client; every caller gets its own copy
+  // One edit per file: `also` rewrites from the original text, so two edits of one file do not compose.
+  [F.cli, CACHE, CACHE.replace('undefined, this)', 'undefined)').replace('undefined, this)', 'undefined)'), ['scope: clients on different nodes one after the other', 'scope: a value another caller put']],
+  [F.cli, '    }, this);\n    if (cacheable) memPut', '    });\n    if (cacheable) memPut', ['scope: clients on different nodes asking at the same time', 'scope: a slow call another caller started']],
+  [F.cli, 'const q = await singleflight(key, async () => {', 'const q = await ((_k, f, _s) => f())(key, async () => {', 'scope: one client asking the same request four times'],
+  [F.cli, 'if (hit) return structuredClone(hit);', 'if (hit) return hit;', 'copy: every quote answered from the cache'],
+  [F.cli, 'return structuredClone(q);', 'return q;', ['copy: every quote answered from the cache', 'copy: two callers sharing one read']],
+  [F.res, 'function bucket(scope: object = DEFAULT): Bucket {', 'function bucket(_scope: object = DEFAULT, scope = DEFAULT): Bucket {',
+    ['scope: clients on different nodes one after the other', 'scope: clients on different nodes asking at the same time', 'scope: a value another caller put', 'scope: a slow call another caller started', 'registry: two instances with their own fetch']],
+  [F.res, 'SCOPES = new WeakMap();', 'void SCOPES;', 'scope: __resetResilience clears the cache of a live client'],
+  [F.cli, 'const cacheable = this.cacheTtlMs > 0 && req.blockNumber === undefined;\n    if (cacheable) {\n      const hit = memGet(key, this.cacheTtlMs,',
+    'const cacheable = req.blockNumber === undefined;\n    if (cacheable) {\n      const hit = memGet(key, 60_000,', 'cache: cacheTtlMs 0 reads the node on every request'],
+  [F.reg, '}, this.fetchFn);', '});', 'registry: two instances with their own fetch'],
+  [F.reg, 'const raw = await singleflight(`registry ${this.url}`, async () => {', 'const raw = await ((_k, f, _s) => f())(`registry ${this.url}`, async () => {', 'registry: two instances sharing one fetch'],
 ];
 
 const only = process.argv.slice(2).map(Number);

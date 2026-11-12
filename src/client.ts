@@ -380,15 +380,17 @@ export class BlazePhoenix {
     const key = `Q|${ctx.chainId}|${ctx.dep.version}|${ctx.dep.contracts.quoter}|${tIn.address}|${tIn.native}|${tOut.address}|${tOut.native}|${amountIn}|${userMinOut}|${req.blockNumber ?? ''}`;
     const cacheable = this.cacheTtlMs > 0 && req.blockNumber === undefined;
     if (cacheable) {
-      const hit = memGet(key, this.cacheTtlMs) as Quote | undefined;
-      if (hit) return hit;
+      const hit = memGet(key, this.cacheTtlMs, undefined, this) as Quote | undefined;
+      if (hit) return structuredClone(hit);
     }
+    // Scoped to this client: another client (another node) never answers it.
+    // Every caller gets its own copy; the cached object never leaves.
     const q = await singleflight(key, async () => {
       const { pv, fb } = await this.readPreview(ctx, tIn.address, tOut.address, amountIn, userMinOut, req.blockNumber);
       return this.buildQuote(ctx, tIn, tOut, amountIn, pv, fb, req.blockNumber);
-    });
-    if (cacheable) memPut(key, q);
-    return q;
+    }, this);
+    if (cacheable) memPut(key, q, undefined, this);
+    return structuredClone(q);
   }
 
   /** Execution-grade re-quote (previewPlanExact): every concentrated leg is
