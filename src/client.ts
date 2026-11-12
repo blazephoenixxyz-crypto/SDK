@@ -758,8 +758,7 @@ export class BlazePhoenix {
     }
   }
 
-  /** Staking proof-of-solvency: coming soon. Fails with `not_deployed` until a staking engine is
-   *  registered; once one is, it is read on your RPC. */
+  /** Proof-of-solvency: coming soon. Reads the staking engine on your RPC; throws `not_deployed` on a chain where no staking engine is registered. */
   async solvency(chain: string | number = 8453): Promise<SolvencyReport> {
     const chainId = resolveChain(chain);
     const staking = CHAINS[chainId].staking;

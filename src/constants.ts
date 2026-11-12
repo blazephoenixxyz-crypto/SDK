@@ -29,7 +29,7 @@ export interface ChainInfo {
   usdc: `0x${string}`;
   /** BZPX token. Unset everywhere: BZPX is coming soon and its address is not published yet. */
   bzpx?: `0x${string}`;
-  /** BlazePhoenix staking engine, where live. */
+  /** BlazePhoenix staking engine, where one is registered. */
   staking?: `0x${string}`;
   /** Approximate seconds per block — used to size log scans. */
   blockTime: number;

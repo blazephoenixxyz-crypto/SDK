@@ -15,7 +15,7 @@ npm i @blazephoenix/sdk viem
 
 ## BlazePhoenix in one sentence
 
-BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine (coming soon) that proves its own solvency on every transaction. V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
+BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine (proof-of-solvency: coming soon). V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
 
 **Swap** in the [app](https://blazephoenix.xyz/?tab=swap) · **integrate** with the [SDK](https://github.com/blazephoenixxyz-crypto/SDK) (`npm i @blazephoenix/sdk`) · **connect an agent** to the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) (`https://blazephoenix.xyz/mcp`, no key)
 
@@ -64,7 +64,8 @@ const plan = await blaze.buildSwap({
 });
 plan.steps;       // [approve?, swap] — { chainId, to, data, value }
 plan.minOut;      // the minimum the Router will enforce for you
-                  // (your userMinOut as given, when set; refused below the quote net of slippage)
+                  // (your userMinOut as given, when set, refused below the quote net of slippage;
+                  // otherwise the quote net of slippage, never under the on-chain floor)
 plan.encodedBy;   // 'quoter' on 2.x (the Quoter's own bytes, verified) · 'sdk' on 1.x
 
 // 3) optional: dry-run on your node, then execute with YOUR wallet
@@ -173,7 +174,7 @@ await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, er
 await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
 const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
 await blaze.tokenInfo('base', '0x…');  // symbol / name / decimals
-await blaze.solvency();                // proof-of-solvency: coming soon; `not_deployed` until an engine is registered
+await blaze.solvency();                // proof-of-solvency: coming soon; `not_deployed` where no engine is registered
 toJSON(quote);                         // bigint → string, for HTTP / queues / LLMs
 ```
 
