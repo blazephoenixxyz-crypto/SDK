@@ -658,7 +658,8 @@ for (const [label, mk, nets] of [['1.x', mk1, true], ['2.x', mk2, false]] as con
     const under = await codeOf(() => build(pct, s, a, m.want - 1n));
     return above === 'min_above_exact' && under === 'min_implausible' ? undefined : `pct ${pct} s ${s} a ${a}: above ${above}, under ${under}`;
   });
-  check(`exact ${label}: the grid holds plans on both sides (${open.length} built, ${byIron.length} refused by the on-chain floor, ${over.length} by the quote)`, open.length > 0 && byIron.length > 0 && over.length > 0);
+  // The grid must reach every side, or the checks below pass on empty sets: a grid that does not is a broken test, not a red check.
+  if (!(open.length > 0 && byIron.length > 0 && over.length > 0)) throw new Error(`exact ${label}: the grid holds ${open.length} open, ${byIron.length} shut by the on-chain floor, ${over.length} shut by the quote`);
   // buildSwap × verifyPlan on the same RPC: whatever exact mode answers, a plan or a refusal, never a
   // plan that the quote's floor (measured again by verifyPlan) refuses as plan_mismatch.
   await forAll(`exact ${label}: every plan buildSwap answers passes verifyPlan with its request on the same RPC; the rest is min_above_exact (${grid.length} requests)`, grid.length, async (i) => {
@@ -762,7 +763,8 @@ console.log('client · a revert whose text reads like a transport failure');
     const restore = stubFetch(mockNode({ outFor: out3, allowance: 2n ** 200n }).provider, (m) => (failing && m === 'eth_call' ? fault : undefined));
     try {
       const b = new BlazePhoenix({ rpc: { base: URL_ }, registry: { mode: 'embedded' }, cacheTtlMs: 0, retries: 0, timeoutMs: 80 });
-      const plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME });
+      let plan: SwapPlan;
+      try { plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME }); } catch (e) { kinds.push(`${fname}: the healthy build failed: ${(e as Error).message}`); continue; }
       failing = true;
       const c = await codeOf(() => b.simulate(plan, ME));
       if (c !== 'rpc_error') kinds.push(`${fname}: ${c}`);
@@ -786,8 +788,12 @@ console.log('client · execute: reads that fail on a URL carrying a key');
     return { wallet: createWalletClient({ account: ME, transport: custom({ request }) }), sent };
   };
   const within = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<never>((_r, rej) => setTimeout(() => rej(new Error(`no answer in ${ms} ms`)), ms))]);
-  // [label, the node methods that answer 429 once the plan is built, allowance on the node, transactions the wallet is handed]
+  // [label, the node methods that answer 429 once the plan is built, allowance on the node, transactions the wallet is handed].
+  // Only the allowance eth_call fails (selector 0xdd62ed3e): execute's own quote read must still answer, or the
+  // allowance read is never reached.
   const RECEIPT = ['eth_getTransactionReceipt', 'eth_getTransactionByHash'];
+  const ALLOWANCE = '0xdd62ed3e';
+  const callData = (params: unknown) => String((params as { data?: string; input?: string }[] | undefined)?.[0]?.data ?? (params as { input?: string }[] | undefined)?.[0]?.input ?? '');
   const runs: [string, string[], bigint, number][] = [
     ['the allowance read', ['eth_call'], 0n, 0],
     ['the approval receipt wait', RECEIPT, 0n, 1],
@@ -796,14 +802,16 @@ console.log('client · execute: reads that fail on a URL carrying a key');
   for (const [label, methods, allowance, handed] of runs) {
     __resetResilience();
     let failing = false;
-    const restore = stubFetch(mockNode({ outFor: out3, allowance }).provider, (m) => (failing && methods.includes(m) ? { kind: 'http', status: 429, body: `{"error":"rate limited ${URL_}"}` } : undefined));
+    const restore = stubFetch(mockNode({ outFor: out3, allowance }).provider, (m, params) => (failing && methods.includes(m) && (m !== 'eth_call' || callData(params).startsWith(ALLOWANCE)) ? { kind: 'http', status: 429, body: `{"error":"rate limited ${URL_}"}` } : undefined));
     try {
       const b = new BlazePhoenix({ rpc: { base: URL_ }, registry: { mode: 'embedded' }, cacheTtlMs: 0, retries: 0, timeoutMs: 500 });
-      const plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME });
       const { wallet, sent } = walletOf();
-      failing = true;
       let seen: unknown = 'returned';
-      try { await within(b.execute({ wallet, plan: allowance === 0n ? plan : { ...plan, approval: null }, simulate: false }), 90_000); } catch (e) { seen = e; }
+      try {
+        const plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME });
+        failing = true;
+        await within(b.execute({ wallet, plan: allowance === 0n ? plan : { ...plan, approval: null }, simulate: false }), 90_000);
+      } catch (e) { seen = e; }
       const leak = allStrings(seen).filter((s) => s.includes(KEY));
       const names = seen instanceof BlazeError ? `BlazeError ${seen.code}` : seen instanceof Error ? `raw ${seen.name}` : String(seen);
       check(`execute: ${label} failing is a BlazeError rpc_error that never carries the RPC key`, seen instanceof BlazeError && seen.code === 'rpc_error' && leak.length === 0 && sent.length === handed,

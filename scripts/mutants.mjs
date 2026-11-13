@@ -121,6 +121,8 @@ const M = [
   [F.cli, 'if (floor > ceil) {', 'if (false) {', ['exact 1.x: a default minimum above', 'exact 2.x: a default minimum above', 'exact 1.x: execute refuses every request', 'exact 2.x: execute refuses every request']],
   [F.cli, 'if (floor > ceil) {', 'if (floor >= ceil) {', ['exact 1.x: the signed minimum is max(', 'exact 2.x: the signed minimum is max(']],
   [F.cli, RAISE, 'floor = floor;', ['exact 1.x: the signed minimum is max(', 'exact 2.x: the signed minimum is max(', 'exact 1.x: execute signs an open plan', 'exact 2.x: execute signs an open plan']],
+  [F.cli, 'if (ceil !== undefined && userMinOut > ceil && userMinOut > floor) {', 'if (ceil !== undefined && userMinOut > ceil + 1n && userMinOut > floor) {', ['exact 1.x: inside the ceiling', 'exact 2.x: inside the ceiling']],
+  [F.cli, 'if (userMinOut < floor) {', 'if (userMinOut < floor - 1n) {', ['exact 1.x: inside the ceiling', 'exact 2.x: inside the ceiling']],
   [F.err, "if (name === 'ExecutionRevertedError' || name === 'ContractFunctionRevertedError' || e.code === 3) return false;", '', ['simulate: a revert is answered as a cleaned revert', 'isTransportError: a revert class']],
   [F.err, "name === 'ExecutionRevertedError' || ", '', 'isTransportError: a revert class'],
   [F.err, "name === 'ContractFunctionRevertedError' || ", '', 'isTransportError: a revert class'],

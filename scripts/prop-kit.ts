@@ -212,12 +212,12 @@ export type Fault =
   | { kind: 'garbage' }
   | { kind: 'hang' };
 /** Replaces global fetch with a JSON-RPC endpoint backed by `node`; returns the restore function. */
-export function stubFetch(node: { request: (a: { method: string; params?: unknown }) => Promise<unknown> }, fault: (method: string) => Fault | undefined) {
+export function stubFetch(node: { request: (a: { method: string; params?: unknown }) => Promise<unknown> }, fault: (method: string, params?: unknown) => Fault | undefined) {
   const real = globalThis.fetch;
   const json = (body: unknown, status = 200) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? '{}')) as { id: number; method: string; params?: unknown };
-    const f = fault(body.method);
+    const f = fault(body.method, body.params);
     if (f?.kind === 'http') return json(f.body, f.status);
     if (f?.kind === 'throw') throw new TypeError(f.message);
     if (f?.kind === 'garbage') return json('<html>upstream unavailable</html>');
