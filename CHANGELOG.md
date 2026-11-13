@@ -29,6 +29,17 @@
   of the plan taken when it is called; a plan that is not plain data (getters, a Proxy, a class
   instance, bigints as strings) throws `bad_request`.
 - `buildSwap`: `plan.minOut` is the minimum actually signed when the Quoter encoded a higher one.
+- `buildSwap({ exact: true })`: the signed minimum is never above `exactOut` less the 50 bps
+  safety margin, and never below the default minimum. Where the default path's minimum sat above
+  the dry-run, the swap was signed to revert; such a request is now refused with
+  `min_above_exact` (the default minimum is the quote net of `slippageBps`, never under the
+  on-chain floor), so `execute` never signs it and `verifyPlan` never sees a minimum under the
+  quote's floor.
+- A revert is told from a node failure by what the error is (its class, JSON-RPC code 3), not
+  by its text. A revert reason reading "429" or "rate limit" is reported as a revert, and a
+  node answering 429 / 5xx / timeout inside `simulate` is reported as `rpc_error`.
+- `execute`: the allowance read and both receipt waits fail as a `BlazeError` `rpc_error`
+  whose message never carries the RPC URL; a receipt failure names the transaction that was sent.
 
 ## 1.2.1 — one meaning per field
 

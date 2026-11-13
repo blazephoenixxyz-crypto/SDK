@@ -3,7 +3,7 @@
 // mutant that must turn it red. A check that stays green on its mutant proves nothing.
 //
 //   node scripts/mutants.mjs            run all (one at a time; never alongside `npm test`)
-//   node scripts/mutants.mjs 7 12       run ATQ-periferia-7 and -12
+//   node scripts/mutants.mjs 7 12       run PER-7 and PER-12
 //
 // Verdict is by the NAME of the paired check, not by the exit code:
 //   KILLED        every paired check printed ✗
@@ -17,6 +17,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const SUITE = ['npx', 'tsx', 'scripts/test-properties.ts'];
 const F = { cal: 'src/calldata.ts', chk: 'src/checks.ts', erc: 'src/erc20.ts', err: 'src/errors.ts', rpc: 'src/rpc.ts', cli: 'src/client.ts', res: 'src/resilience.ts', reg: 'src/registry.ts' };
 const CACHE = ((t) => t.slice(t.indexOf('memGet(key, this.cacheTtlMs, undefined, this)'), t.indexOf('memPut(key, q, undefined, this)') + 31))(readFileSync(F.cli, 'utf8'));
+const RAISE = 'floor = maxBig(floor, minOutFor(ceil, slippageBps, 0n));';
+const EXACT = ((t) => t.slice(t.indexOf('if (floor > ceil) {'), t.indexOf(RAISE) + RAISE.length))(readFileSync(F.cli, 'utf8'));
 const guard = (cond) => [`if (${cond}) bad.push`, 'if (false) bad.push'];
 const FAULTS = ['quote', 'quoteExact', 'buildSwap', 'tokenInfo', 'getFills'].map((e) => `faults: ${e} fails as a BlazeError`);
 
@@ -99,7 +101,7 @@ const M = [
 
   [F.res, 'now - hit.at < ttlMs', 'now - hit.at <= ttlMs', 'cache: an entry lives strictly less'],
   [F.res, 'if (mem.size > 500) {', 'if (mem.size > 5000) {', 'cache: bounded'],
-  // fin-1111: 4193 / atq:PER-6, the cache and the in-flight sharing are per client; every caller gets its own copy
+  // The cache and the in-flight sharing are per client; every caller gets its own copy
   // One edit per file: `also` rewrites from the original text, so two edits of one file do not compose.
   [F.cli, CACHE, CACHE.replace('undefined, this)', 'undefined)').replace('undefined, this)', 'undefined)'), ['scope: clients on different nodes one after the other', 'scope: a value another caller put']],
   [F.cli, '    }, this);\n    if (cacheable) memPut', '    });\n    if (cacheable) memPut', ['scope: clients on different nodes asking at the same time', 'scope: a slow call another caller started']],
@@ -113,6 +115,26 @@ const M = [
     'const cacheable = req.blockNumber === undefined;\n    if (cacheable) {\n      const hit = memGet(key, 60_000,', 'cache: cacheTtlMs 0 reads the node on every request'],
   [F.reg, '}, this.fetchFn);', '});', 'registry: two instances with their own fetch'],
   [F.reg, 'const raw = await singleflight(`registry ${this.url}`, async () => {', 'const raw = await ((_k, f, _s) => f())(`registry ${this.url}`, async () => {', 'registry: two instances sharing one fetch'],
+  // Exact minimum, revert versus transport, execute reads
+  // exact minimum: refused, never capped, when the default minimum is above the dry-run less the margin
+  [F.cli, EXACT, EXACT.replace('if (floor > ceil) {', 'if (p.ironFloor > ceil) {').replace(RAISE, `${RAISE} if (floor > ceil) floor = ceil;`), ['exact 1.x: a default minimum above', 'exact 2.x: a default minimum above', 'exact 1.x: where the preview sits above the dry-run', 'exact 2.x: where the preview sits above the dry-run', 'exact 1.x: every plan buildSwap answers passes verifyPlan', 'exact 2.x: every plan buildSwap answers passes verifyPlan', 'exact 1.x: execute refuses every request', 'exact 2.x: execute refuses every request']],
+  [F.cli, 'if (floor > ceil) {', 'if (false) {', ['exact 1.x: a default minimum above', 'exact 2.x: a default minimum above', 'exact 1.x: execute refuses every request', 'exact 2.x: execute refuses every request']],
+  [F.cli, 'if (floor > ceil) {', 'if (floor >= ceil) {', ['exact 1.x: the signed minimum is max(', 'exact 2.x: the signed minimum is max(']],
+  [F.cli, RAISE, 'floor = floor;', ['exact 1.x: the signed minimum is max(', 'exact 2.x: the signed minimum is max(', 'exact 1.x: execute signs an open plan', 'exact 2.x: execute signs an open plan']],
+  [F.err, "if (name === 'ExecutionRevertedError' || name === 'ContractFunctionRevertedError' || e.code === 3) return false;", '', ['simulate: a revert is answered as a cleaned revert', 'isTransportError: a revert class']],
+  [F.err, "name === 'ExecutionRevertedError' || ", '', 'isTransportError: a revert class'],
+  [F.err, "name === 'ContractFunctionRevertedError' || ", '', 'isTransportError: a revert class'],
+  [F.err, ' || e.code === 3', '', 'isTransportError: a revert class'],
+  [F.err, "name === 'HttpRequestError' || ", '', ['isTransportError: a transport class', 'simulate: a node that refuses to serve']],
+  [F.err, "name === 'TimeoutError' || ", '', 'isTransportError: a transport class'],
+  [F.err, " || name === 'WebSocketRequestError'", '', 'isTransportError: a transport class'],
+  [F.err, 'words ||= ', 'words &&= ', 'isTransportError: with no class in the chain'],
+  [F.err, '  return words;\n}', '  return true;\n}', 'isTransportError: with no class in the chain'],
+  [F.cli, "args: [account.address, plan.approval.spender],\n      }).catch((e: unknown) => this.wrapReadError(e, 'allowance'))", 'args: [account.address, plan.approval.spender],\n      })', 'execute: the allowance read failing is'],
+  [F.cli, '.catch((e: unknown) => this.wrapReadError(e, `receipt of the approval ${approvalHash}`))', '', ['execute: the approval receipt wait failing is', 'execute: the approval receipt wait failing names']],
+  [F.cli, '.catch((e: unknown) => this.wrapReadError(e, `receipt of the swap ${hash}`))', '', ['execute: the swap receipt wait failing is', 'execute: the swap receipt wait failing names']],
+  [F.cli, '`receipt of the approval ${approvalHash}`', "'receipt of the approval'", 'execute: the approval receipt wait failing names'],
+  [F.cli, '`receipt of the swap ${hash}`', "'receipt of the swap'", 'execute: the swap receipt wait failing names'],
 ];
 
 const only = process.argv.slice(2).map(Number);
@@ -121,7 +143,7 @@ const dead = new Set();   // paired name prefixes with a killed mutant
 const clean = only.length ? '' : spawnSync(SUITE[0], SUITE.slice(1), { encoding: 'utf8', timeout: 180_000 }).stdout ?? '';
 if (!only.length && !/^properties: \d+ passed, 0 failed$/m.test(clean)) { console.error('the suite is not green before any mutant — fix that first'); process.exit(2); }
 for (const [i, [file, old, neu, tests, opt]] of M.entries()) {
-  const id = `ATQ-periferia-${i + 1}`;
+  const id = `PER-${i + 1}`;
   if (only.length && !only.includes(i + 1)) continue;
   const names = [tests].flat();
   const edits = [[file, old, neu], ...(opt?.also ?? [])];

@@ -547,6 +547,14 @@ export class BlazePhoenix {
       if (req.exact) {
         const ex = await exactRead(p.route);
         ceil = minOutFor(ex, EXACT_MARGIN_BPS, 0n);
+        // The default minimum is never lowered, and none is signed above the dry-run: when the
+        // two do not meet (the quote net of slippageBps, or the on-chain floor, above the ceiling),
+        // no minimum honours both, so the request is refused rather than capped.
+        if (floor > ceil) {
+          throw new BlazeError('min_above_exact',
+            `the default minimum ${floor} (this quote net of slippageBps, never under the on-chain floor ${p.ironFloor}) is above ${ceil} (exactOut less ${EXACT_MARGIN_BPS} bps): no minimum honours both the quote and the dry-run`,
+            { details: { floor: floor.toString(), ironFloor: p.ironFloor.toString(), ceiling: ceil.toString() } });
+        }
         floor = maxBig(floor, minOutFor(ceil, slippageBps, 0n));
       }
       if (userMinOut === 0n) return floor;
@@ -772,10 +780,10 @@ export class BlazePhoenix {
     if (plan.approval) {
       const current = await client.readContract({
         address: plan.approval.token, abi: ERC20_ABI, functionName: 'allowance', args: [account.address, plan.approval.spender],
-      });
+      }).catch((e: unknown) => this.wrapReadError(e, 'allowance'));
       if (current < plan.quote.amountIn) {
         approvalHash = await send(plan.approval.tx);
-        const r = await client.waitForTransactionReceipt({ hash: approvalHash });
+        const r = await client.waitForTransactionReceipt({ hash: approvalHash }).catch((e: unknown) => this.wrapReadError(e, `receipt of the approval ${approvalHash}`));
         if (r.status !== 'success') throw new BlazeError('reverted', `approval transaction reverted (${approvalHash})`);
       }
       plan = { ...plan, approval: { ...plan.approval, current: plan.approval.amount } };
@@ -797,7 +805,7 @@ export class BlazePhoenix {
     }
     const hash = await send(plan.tx);
     if (!wait) return { plan, ...(approvalHash ? { approvalHash } : {}), hash };
-    const receipt = await client.waitForTransactionReceipt({ hash });
+    const receipt = await client.waitForTransactionReceipt({ hash }).catch((e: unknown) => this.wrapReadError(e, `receipt of the swap ${hash}`));
     let amountOut: bigint | undefined;
     if (receipt.status === 'success') {
       const logs = parseEventLogs({ abi: ROUTER_ABI, logs: receipt.logs, eventName: 'Swap' })
