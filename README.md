@@ -217,7 +217,7 @@ Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; pr
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
 | `plan_mismatch` | `verifyPlan` / `execute`: the plan's bytes do not execute what you asked for (`details.fields` names each field) — nothing was sent |
 | `min_implausible` | `buildSwap`: `userMinOut` below the quote net of `slippageBps` (or the on-chain floor) |
-| `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut` above `exactOut` less the 50 bps safety margin |
+| `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut`, or the default minimum (the quote net of `slippageBps`, or the on-chain floor), above `exactOut` less the 50 bps safety margin |
 | `deployment_unverified` | a registry deployment failed on-chain verification |
 | `unsupported_by_version` | e.g. native ETH input on a 1.x Router |
 | `not_deployed` / `bad_request` / `wallet_chain_mismatch` / `reverted` | as named |

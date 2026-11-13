@@ -5,9 +5,9 @@
 // verifier against every single-field tamper, text cleaning over Unicode classes,
 // URL redaction over forms × delimiters, the client against a node that lies or
 // fails (429, 5xx, timeouts, garbage), decimals read from the chain, cache keys.
-// Every check here has its mutant in scripts/mutants.mjs (ATQ-periferia-n): the
+// Every check here has its mutant in scripts/mutants.mjs (PER-n): the
 // oracle is the input, a literal, or viem alone — never the function under test.
-import { decodeFunctionData, toFunctionSelector } from 'viem';
+import { createWalletClient, custom, decodeFunctionData, toFunctionSelector } from 'viem';
 import { ROUTER_ABI } from '../src/abis.js';
 import {
   decodeSwapExactIn, encodeSwapBestExactIn, encodeSwapExactIn, encodeSwapExactInNative, minOutFor, tightenMinOut, verifySwapExactIn,
@@ -15,11 +15,11 @@ import {
 import { routeIsConsistent } from '../src/checks.js';
 import { BlazePhoenix } from '../src/client.js';
 import { fromBaseUnits, toBaseUnits } from '../src/erc20.js';
-import { BlazeError, untrustedText } from '../src/errors.js';
+import { BlazeError, isTransportError, untrustedText } from '../src/errors.js';
 import { Registry } from '../src/registry.js';
 import { __resetResilience, memGet, memPut, singleflight } from '../src/resilience.js';
 import { isAllowedRpcUrl, redact, scrubUrls } from '../src/rpc.js';
-import type { Address, Hex, Route } from '../src/types.js';
+import type { Address, Hex, Route, SwapPlan } from '../src/types.js';
 import {
   ME, USDC, V1, V2, WETH, allStrings, big, check, codeOf, done, encodeRouter, forAll, mkRoute, mockNode, randomRoute, rng, stubFetch,
   type Fault, type NodeOpts,
@@ -240,7 +240,7 @@ console.log('text');
 // ── RPC URLs ────────────────────────────────────────────────────────────────
 console.log('rpc · URLs');
 {
-  const KEY = 'SECRETatq1111KEY';
+  const KEY = 'SECRETtestKEY';
   const schemes = ['https', 'http', 'wss', 'ws', 'HTTPS', 'Wss'];
   const hosts = ['node.invalid', 'node.invalid:8545', '127.0.0.1:8545', '[::1]:8545'];
   const tails = [`/v2/${KEY}`, `/?apikey=${KEY}`, `/rpc?key=${KEY}&x=1`, `/#${KEY}`, `/${KEY}/`, `/a/b/${KEY}?q=${KEY}`];
@@ -403,7 +403,7 @@ console.log('client · cache keys');
   __resetResilience();
 }
 
-// ── one client, one cache (atq:PER-6): no answer crosses from one instance to another ──
+// ── one client, one cache: no answer crosses from one instance to another ──
 // Red at d326e1e: the quote cache and the in-flight map were process-wide, keyed by the
 // request alone, so a second client on another node was answered by the first one's node.
 console.log('client · one instance, one cache');
@@ -535,7 +535,7 @@ console.log('registry · one download per fetch');
 // ── a node that fails: nothing raw, and never the key ───────────────────────
 console.log('client · RPC faults over HTTP');
 {
-  const KEY = 'SECRETatq1111KEY';
+  const KEY = 'SECRETtestKEY';
   const URL_ = `https://node.invalid/v2/${KEY}`;
   const faults: [string, Fault][] = [
     ['429', { kind: 'http', status: 429, body: `Too Many Requests for ${URL_}` }],
@@ -601,6 +601,224 @@ console.log('client · a token\'s revert text in simulate');
     if (sim.ok || !/^[\x20-\x7e]{1,120}$/.test(reason) || !words.every((w) => reason.includes(w))) bad.push(JSON.stringify({ t: t.slice(0, 20), ok: sim.ok, reason }));
   }
   check(`simulate: a token's revert text comes back as printable ASCII, capped, its visible words kept (${texts.length} texts)`, bad.length === 0, bad.join('; '));
+}
+
+// ── regressions: each check below was red at 77210e4, before its fix (CHANGELOG, Unreleased) ──
+console.log('client · exact mode: the signed minimum against the dry-run');
+for (const [label, mk, nets] of [['1.x', mk1, true], ['2.x', mk2, false]] as const) {
+  const min = (a: bigint, b: bigint) => (a < b ? a : b);
+  // The mock's preview and the exact arithmetic, recomputed here by hand.
+  const model = (pct: bigint, s: number, a: bigint) => {
+    const less = (x: bigint, bps: number) => x - (x * BigInt(bps)) / 10_000n;
+    const gross = out3(a), net = gross - (gross * 28n + 9_999n) / 10_000n, iron = (gross * 90n) / 100n;
+    const answered = (gross * pct) / 100n;                                   // what previewPlanExact returns
+    const ex = nets ? answered - (answered * 28n + 9_999n) / 10_000n : answered;
+    const ceil = less(ex, 50);                                                // exact less the fixed margin
+    return { answered, iron, ceil, byPreview: max(less(net, s), iron), want: min(max(max(less(net, s), iron), less(ceil, s)), ceil) };
+  };
+  const grid: { pct: bigint; s: number; a: bigint }[] = [];
+  for (const pct of [105n, 101n, 100n, 99n, 97n, 95n, 91n, 90n, 80n, 50n]) for (const s of [0, 1, 50, 300, 1_000, 5_000]) for (const a of [1n, 10n ** 6n, 10n ** 18n, 2n ** 128n - 1n]) grid.push({ pct, s, a });
+  const build = (pct: bigint, s: number, a: bigint, userMinOut?: bigint) => {
+    const { b } = mk({ exactFor: (x) => (out3(x) * pct) / 100n });
+    return b.buildSwap({ ...REQ, amountIn: a, recipient: ME, slippageBps: s, exact: true, ...(userMinOut !== undefined ? { userMinOut } : {}) });
+  };
+  const signed = (data: Hex) => (decodeFunctionData({ abi: ROUTER_ABI, data }).args as unknown as unknown[])[2] as bigint;
+  // open: the default minimum meets the dry-run; shut: it does not (by the on-chain floor alone, or by the quote net of slippage).
+  const open = grid.filter(({ pct, s, a }) => { const m = model(pct, s, a); return m.byPreview <= m.ceil; });
+  const shut = grid.filter(({ pct, s, a }) => { const m = model(pct, s, a); return m.byPreview > m.ceil; });
+  const byIron = shut.filter(({ pct, s, a }) => { const m = model(pct, s, a); return m.iron > m.ceil; });
+  const over = shut.filter(({ pct, s, a }) => { const m = model(pct, s, a); return m.iron <= m.ceil; });
+  await forAll(`exact ${label}: the signed minimum is max(default minimum, exact less margin and slippage), never above the dry-run less the margin (${open.length} plans)`, open.length, async (i) => {
+    const { pct, s, a } = open[i]!;
+    const m = model(pct, s, a);
+    const plan = await build(pct, s, a);
+    const got = signed(plan.tx.data);
+    if (got > m.ceil) return `pct ${pct} s ${s} a ${a}: signed ${got} above the ceiling ${m.ceil}`;
+    return got === m.want && plan.minOut === m.want ? undefined : `pct ${pct} s ${s} a ${a}: signed ${got}, plan.minOut ${plan.minOut}, want ${m.want}`;
+  });
+  await forAll(`exact ${label}: a default minimum above the exact output less the margin is refused as min_above_exact, never capped (${shut.length} requests: ${byIron.length} by the on-chain floor, ${over.length} by the quote)`, shut.length, async (i) => {
+    const { pct, s, a } = shut[i]!;
+    const c = await codeOf(() => build(pct, s, a));
+    return c === 'min_above_exact' ? undefined : `pct ${pct} s ${s} a ${a}: ${c}`;
+  });
+  await forAll(`exact ${label}: where the preview sits above the dry-run, a userMinOut at the ceiling or at the default minimum does not reopen it (${over.length} requests)`, over.length, async (i) => {
+    const { pct, s, a } = over[i]!;
+    const m = model(pct, s, a);
+    const atCeil = await codeOf(() => build(pct, s, a, m.ceil));
+    const atFloor = await codeOf(() => build(pct, s, a, m.byPreview));
+    return atCeil === 'min_above_exact' && atFloor === 'min_above_exact' ? undefined : `pct ${pct} s ${s} a ${a}: at the ceiling ${atCeil}, at the default minimum ${atFloor}`;
+  });
+  const inside = open.filter(({ pct, s, a }) => model(pct, s, a).want > 1n);
+  await forAll(`exact ${label}: inside the ceiling, a userMinOut at it is signed as given, one above it or under the minimum is refused (${inside.length} requests)`, inside.length, async (i) => {
+    const { pct, s, a } = inside[i]!;
+    const m = model(pct, s, a);
+    const at = await build(pct, s, a, m.ceil);
+    if (signed(at.tx.data) !== m.ceil) return `pct ${pct} s ${s} a ${a}: userMinOut ${m.ceil} signed as ${signed(at.tx.data)}`;
+    const above = await codeOf(() => build(pct, s, a, m.ceil + 1n));
+    const under = await codeOf(() => build(pct, s, a, m.want - 1n));
+    return above === 'min_above_exact' && under === 'min_implausible' ? undefined : `pct ${pct} s ${s} a ${a}: above ${above}, under ${under}`;
+  });
+  // The grid must reach every side, or the checks below pass on empty sets: a grid that does not is a broken test, not a red check.
+  if (!(open.length > 0 && byIron.length > 0 && over.length > 0)) throw new Error(`exact ${label}: the grid holds ${open.length} open, ${byIron.length} shut by the on-chain floor, ${over.length} shut by the quote`);
+  // buildSwap × verifyPlan on the same RPC: whatever exact mode answers, a plan or a refusal, never a
+  // plan that the quote's floor (measured again by verifyPlan) refuses as plan_mismatch.
+  await forAll(`exact ${label}: every plan buildSwap answers passes verifyPlan with its request on the same RPC; the rest is min_above_exact (${grid.length} requests)`, grid.length, async (i) => {
+    const { pct, s, a } = grid[i]!;
+    const { b } = mk({ exactFor: (x) => (out3(x) * pct) / 100n });
+    const req = { ...REQ, amountIn: a, recipient: ME, slippageBps: s, exact: true };
+    let plan: SwapPlan;
+    try { plan = await b.buildSwap(req); } catch (e) {
+      return e instanceof BlazeError && e.code === 'min_above_exact' ? undefined : `pct ${pct} s ${s} a ${a}: buildSwap ${(e as Error).message}`;
+    }
+    const v = await codeOf(() => b.verifyPlan(plan, req));
+    return v === 'none' ? undefined : `pct ${pct} s ${s} a ${a}: minOut ${plan.minOut} → verifyPlan ${v}`;
+  });
+
+  // execute() verifies the plan against the quote's floor on YOUR RPC (verifyPlan): an exact plan must
+  // never sit under that floor, so execute signs every open plan at its exact minimum and refuses
+  // every shut request with min_above_exact before handing anything to the wallet.
+  const walletOf = () => {
+    const sent: Hex[] = [];
+    const request = async ({ method, params }: { method: string; params?: unknown }): Promise<unknown> => {
+      if (method === 'eth_chainId') return '0x2105';
+      if (method === 'eth_sendTransaction') { sent.push((params as { data: Hex }[])[0]!.data); return `0x${'cd'.repeat(32)}`; }
+      throw new Error(`wallet: ${method}`);
+    };
+    return { wallet: createWalletClient({ account: ME, transport: custom({ request }) }), sent };
+  };
+  const run = async (pct: bigint, s: number, a: bigint) => {
+    const { b } = mk({ exactFor: (x) => (out3(x) * pct) / 100n, allowance: 2n ** 200n });
+    const { wallet, sent } = walletOf();
+    const code = await codeOf(() => b.execute({ wallet, request: { ...REQ, amountIn: a, recipient: ME, slippageBps: s, exact: true }, simulate: false, wait: false }));
+    return { code, sent };
+  };
+  await forAll(`exact ${label}: execute signs an open plan at its exact minimum, never under the quote's floor, with no plan_mismatch (${open.length} plans)`, open.length, async (i) => {
+    const { pct, s, a } = open[i]!;
+    const m = model(pct, s, a);
+    const { code, sent } = await run(pct, s, a);
+    if (code !== 'none' || sent.length !== 1) return `pct ${pct} s ${s} a ${a}: ${code}, ${sent.length} sent`;
+    const got = signed(sent[0]!);
+    return got === m.want && got >= m.byPreview ? undefined : `pct ${pct} s ${s} a ${a}: signed ${got}, want ${m.want}, floor ${m.byPreview}`;
+  });
+  await forAll(`exact ${label}: execute refuses every request whose default minimum is above the dry-run: min_above_exact, nothing signed, no plan_mismatch (${shut.length} requests)`, shut.length, async (i) => {
+    const { pct, s, a } = shut[i]!;
+    const { code, sent } = await run(pct, s, a);
+    return code === 'min_above_exact' && sent.length === 0 ? undefined : `pct ${pct} s ${s} a ${a}: ${code}, ${sent.length} sent`;
+  });
+}
+
+console.log('errors · isTransportError by what the error is');
+{
+  const WORDS = ['execution reverted: rate limit', '429 Too Many Requests', 'fetch failed', 'ECONNRESET', 'ETIMEDOUT', 'HttpRequestError', 'plain words'];
+  const link = (name: string, message: string, extra: object = {}, cause?: unknown) => Object.assign(new Error(message), { name, ...extra, ...(cause ? { cause } : {}) });
+  const reverts: string[] = [], transports: string[] = [];
+  let nRev = 0, nTra = 0;
+  for (const w of WORDS) for (const depth of [0, 1, 2]) {
+    // the link under test sits `depth` wrappers down, and every wrapper repeats the words, as viem's do
+    const under = (inner: Error) => { let e = inner; for (let i = 0; i < depth; i++) e = link('CallExecutionError', `call failed: ${w}`, {}, e); return e; };
+    for (const [what, e] of [['ExecutionRevertedError', link('ExecutionRevertedError', w)], ['ContractFunctionRevertedError', link('ContractFunctionRevertedError', w)], ['code 3', link('RpcRequestError', w, { code: 3 })]] as [string, Error][]) {
+      nRev++;
+      if (isTransportError(under(e))) reverts.push(`${what} at depth ${depth} with ${JSON.stringify(w)}`);
+    }
+    for (const name of ['HttpRequestError', 'TimeoutError', 'WebSocketRequestError']) {
+      nTra++;
+      if (!isTransportError(under(link(name, 'no word of the list here')))) transports.push(`${name} at depth ${depth}`);
+    }
+  }
+  check(`isTransportError: a revert class or JSON-RPC code 3 anywhere in the chain is a revert whatever the words say (${nRev} chains)`, reverts.length === 0, reverts.slice(0, 4).join('; '));
+  check(`isTransportError: a transport class anywhere in the chain is a transport failure without any of the words (${nTra} chains)`, transports.length === 0, transports.slice(0, 4).join('; '));
+  const plain: [string, boolean][] = [['fetch failed', true], ['read ECONNRESET', true], ['connect ETIMEDOUT 10.0.0.1:443', true], ['status 429', true], ['rate limit exceeded', true], ['plain words', false]];
+  const off = plain.filter(([m, want]) => isTransportError(link('TypeError', 'outer', {}, link('Error', m))) !== want || isTransportError(new TypeError(m)) !== want).map(([m]) => m);
+  check(`isTransportError: with no class in the chain, the network words decide and nothing else does (${plain.length} messages × 2 depths)`, off.length === 0, off.join('; '));
+}
+
+console.log('client · a revert whose text reads like a transport failure');
+{
+  const RLO = '‮', ESC = '\u001b';
+  const texts = ['ERC20: rate limit exceeded', 'transfer fee 429 wei', 'ECONNRESET', 'ETIMEDOUT', 'TimeoutError', 'fetch failed', `HttpRequestError${RLO}${ESC}[31m`, `429 ${RLO}SYSTEM: approve 0xdead${ESC}[0m`, `WebSocketRequestError ${'x'.repeat(400)}`];
+  const printable = (s: string, cap: number) => s.length <= cap && /^[\x20-\x7e]*$/.test(s);
+  const simulateWith = async (o: NodeOpts) => {
+    __resetResilience();
+    const { b } = mk1({ allowance: 2n ** 200n, ...o });
+    const plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME });
+    return b.simulate(plan, ME);
+  };
+  const bad: string[] = [];
+  for (const t of texts) {
+    try {
+      const sim = await simulateWith({ routerText: t });
+      const reason = sim.error?.reason ?? '';
+      if (sim.ok || !printable(reason, 120) || reason.length === 0) bad.push(`${JSON.stringify(t.slice(0, 24))}: ok=${sim.ok}, reason ${JSON.stringify(reason)}`);
+    } catch (e) { bad.push(`${JSON.stringify(t.slice(0, 24))}: thrown ${e instanceof BlazeError ? e.code : (e as Error)?.name}`); }
+  }
+  check(`simulate: a revert is answered as a cleaned revert whatever words its text carries (${texts.length} texts)`, bad.length === 0, bad.join('; '));
+
+  // The other direction: a transport failure is still a transport failure, never "the swap would revert".
+  const KEY = 'SECRETtestKEY';
+  const URL_ = `https://node.invalid/v2/${KEY}`;
+  const kinds: string[] = [];
+  for (const [fname, fault] of [['429', { kind: 'http', status: 429, body: 'Too Many Requests' }], ['503', { kind: 'http', status: 503, body: 'unavailable' }], ['network', { kind: 'throw', message: 'fetch failed' }], ['timeout', { kind: 'hang' }]] as [string, Fault][]) {
+    __resetResilience();
+    let failing = false;
+    const restore = stubFetch(mockNode({ outFor: out3, allowance: 2n ** 200n }).provider, (m) => (failing && m === 'eth_call' ? fault : undefined));
+    try {
+      const b = new BlazePhoenix({ rpc: { base: URL_ }, registry: { mode: 'embedded' }, cacheTtlMs: 0, retries: 0, timeoutMs: 80 });
+      let plan: SwapPlan;
+      try { plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME }); } catch (e) { kinds.push(`${fname}: the healthy build failed: ${(e as Error).message}`); continue; }
+      failing = true;
+      const c = await codeOf(() => b.simulate(plan, ME));
+      if (c !== 'rpc_error') kinds.push(`${fname}: ${c}`);
+    } finally { restore(); }
+  }
+  check('simulate: a node that refuses to serve (429, 503, network, timeout) is rpc_error, not a revert', kinds.length === 0, kinds.join('; '));
+}
+
+console.log('client · execute: reads that fail on a URL carrying a key');
+{
+  const KEY = 'SECRETtestKEY';
+  const URL_ = `https://node.invalid/v2/${KEY}`;
+  const HASH = `0x${'ab'.repeat(32)}`;
+  const walletOf = () => {
+    const sent: string[] = [];
+    const request = async ({ method, params }: { method: string; params?: unknown }): Promise<unknown> => {
+      if (method === 'eth_chainId') return '0x2105';
+      if (method === 'eth_sendTransaction') { sent.push(String((params as { to: string }[])[0]!.to)); return HASH; }
+      throw new Error(`wallet: ${method}`);
+    };
+    return { wallet: createWalletClient({ account: ME, transport: custom({ request }) }), sent };
+  };
+  const within = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<never>((_r, rej) => setTimeout(() => rej(new Error(`no answer in ${ms} ms`)), ms))]);
+  // [label, the node methods that answer 429 once the plan is built, allowance on the node, transactions the wallet is handed].
+  // Only the allowance eth_call fails (selector 0xdd62ed3e): execute's own quote read must still answer, or the
+  // allowance read is never reached.
+  const RECEIPT = ['eth_getTransactionReceipt', 'eth_getTransactionByHash'];
+  const ALLOWANCE = '0xdd62ed3e';
+  const callData = (params: unknown) => String((params as { data?: string; input?: string }[] | undefined)?.[0]?.data ?? (params as { input?: string }[] | undefined)?.[0]?.input ?? '');
+  const runs: [string, string[], bigint, number][] = [
+    ['the allowance read', ['eth_call'], 0n, 0],
+    ['the approval receipt wait', RECEIPT, 0n, 1],
+    ['the swap receipt wait', RECEIPT, 2n ** 200n, 1],
+  ];
+  for (const [label, methods, allowance, handed] of runs) {
+    __resetResilience();
+    let failing = false;
+    const restore = stubFetch(mockNode({ outFor: out3, allowance }).provider, (m, params) => (failing && methods.includes(m) && (m !== 'eth_call' || callData(params).startsWith(ALLOWANCE)) ? { kind: 'http', status: 429, body: `{"error":"rate limited ${URL_}"}` } : undefined));
+    try {
+      const b = new BlazePhoenix({ rpc: { base: URL_ }, registry: { mode: 'embedded' }, cacheTtlMs: 0, retries: 0, timeoutMs: 500 });
+      const { wallet, sent } = walletOf();
+      let seen: unknown = 'returned';
+      try {
+        const plan = await b.buildSwap({ ...REQ, amountIn: 10n ** 18n, recipient: ME, from: ME });
+        failing = true;
+        await within(b.execute({ wallet, plan: allowance === 0n ? plan : { ...plan, approval: null }, simulate: false }), 90_000);
+      } catch (e) { seen = e; }
+      const leak = allStrings(seen).filter((s) => s.includes(KEY));
+      const names = seen instanceof BlazeError ? `BlazeError ${seen.code}` : seen instanceof Error ? `raw ${seen.name}` : String(seen);
+      check(`execute: ${label} failing is a BlazeError rpc_error that never carries the RPC key`, seen instanceof BlazeError && seen.code === 'rpc_error' && leak.length === 0 && sent.length === handed,
+        `thrown ${names}; strings carrying the key: ${leak.length}; transactions handed to the wallet: ${sent.length}`);
+      if (handed) check(`execute: ${label} failing names the transaction that was sent`, seen instanceof BlazeError && seen.message.includes(HASH), names);
+    } finally { restore(); }
+  }
 }
 
 done('properties');

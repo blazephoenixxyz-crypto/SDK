@@ -178,8 +178,10 @@ export interface SwapRequest extends QuoteRequest {
    * true — also read previewPlanExact (every concentrated leg dry-run) in the same block and
    * derive minOut from its exactOut: a fixed 50 bps safety margin first, then slippageBps off
    * that, never below the default minimum. The calldata still executes the route of the default
-   * path; the exact read must price that same route, or buildSwap refuses. A userMinOut above
-   * exactOut less the margin is refused (`min_above_exact`). One more eth_call; the swap reverts
+   * path; the exact read must price that same route, or buildSwap refuses. A userMinOut, or a
+   * default minimum (the quote net of slippageBps, or the on-chain floor), above exactOut less
+   * the margin is refused (`min_above_exact`): the minimum is never lowered to meet the dry-run.
+   * One more eth_call; the swap reverts
    * instead of filling short when the pool moves past the tolerance.
    */
   exact?: boolean;

@@ -672,7 +672,7 @@ console.log('client · 2.x');
   eq("2.x mode 'best' → swapBestExactIn", decodeFunctionData({ abi: ROUTER_ABI, data: best.tx.data }).functionName, 'swapBestExactIn');
 
   // exact: true — the minimum comes from previewPlanExact (a concentrated route the
-  // preview under-promises by 30 %), never below the default minimum.
+  // preview under-promises by 30 %), never above exactOut less the margin.
   check('default buildSwap never calls previewPlanExact', !calls.some((c) => c.fn === 'previewPlanExact'));
   const deep = (a: bigint) => (a * 3_000n / 10n ** 12n) * 13n / 10n;   // exact = preview gross × 1.3
   const mkExact = (x: Partial<MockOpts> = {}) => {
@@ -689,12 +689,12 @@ console.log('client · 2.x');
     x1.calls.filter((c) => c.fn === 'previewAndEncode' || c.fn === 'previewPlanExact').map((c) => c.block), ['0x100', '0x100']);
   const ep10 = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true, slippageBps: 10 });
   eq('exact: 50 bps of margin off the exact quote, then the slippage (10 bps)', ep10.minOut, minOutFor(minOutFor(3_900_000_000n, 50, 0n), 10, 0n));
-  const low = await mkExact({ exactFor: (a: bigint) => (a * 3_000n / 10n ** 12n) * 9n / 10n }).b
-    .buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true });
-  eq('exact: never below the default minimum', low.minOut, minOutFor(low.quote.amountOut, 50, low.quote.preview.effectiveMinOut));
-  const lowN = await mkExact({ exactFor: (a: bigint) => (a * 3_000n / 10n ** 12n) * 9n / 10n }).b
-    .buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, exact: true });
-  eq('exact + native: never below the default minimum either', lowN.minOut, minOutFor(lowN.quote.amountOut, 50, lowN.quote.preview.effectiveMinOut));
+  // A dry-run that lands on the on-chain floor leaves no minimum under exactOut − 50 bps.
+  const onFloor = { exactFor: (a: bigint) => (a * 3_000n / 10n ** 12n) * 9n / 10n };
+  await throwsCode('exact: a dry-run that leaves the on-chain floor above exactOut − 50 bps is refused',
+    () => mkExact(onFloor).b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true }), 'min_above_exact');
+  await throwsCode('exact + native: refused there as well',
+    () => mkExact(onFloor).b.buildSwap({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC', amountIn: 10n ** 17n, recipient: ME, exact: true }), 'min_above_exact');
   await throwsCode('exact: an exact quote of a different route is refused',
     () => mkExact({ exactPool: EVIL }).b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, exact: true }), 'calldata_mismatch');
   const eb = await mkExact().b.buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, mode: 'best', exact: true });
