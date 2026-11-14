@@ -2,44 +2,19 @@
 
 ## Unreleased
 
-- `quote`: the preview cache and the sharing of identical in-flight reads are per client. Two
-  clients in one process on two nodes are each answered by their own node; before, the second
-  could get the first one's answer for up to `cacheTtlMs`. Every call returns its own copy of
-  the quote, so mutating one never reaches another caller. The registry shares one download
-  only between instances that use the same `fetch`.
-- BZPX: coming soon. `CHAINS[*].bzpx` is unset on every chain, and the `BZPX` symbol is refused
-  with `bad_request` ("BZPX: coming soon — the token address is not published yet; pass a token
-  address") before any RPC call. The address listed under 1.2.0 below is withdrawn; do not use it.
-- Proof-of-solvency: coming soon. `solvency()` keeps failing with `not_deployed` while no staking
-  engine is registered.
-- Examples: the bots default to USDC and refuse `BZPX` by ticker.
-- New `verifyPlan(plan, expectation)` (pure) and `blaze.verifyPlan(plan, request?, signer?)`: decode
-  `plan.tx.data` and `plan.approval.tx.data` and compare chain, Router (the deployment this SDK
-  resolves, not the plan's), function, tokens, amount, value, recipient, deadline and minimum
-  with what was asked, and the approval's token, spender and amount. The calldata must be the
-  canonical encoding of the call it decodes to. Any difference throws the new `plan_mismatch`.
-  `blaze.verifyPlan` floors the minimum with a quote it reads on your RPC (net of your slippage
-  for the drift and again for the swap, never under the Quoter's on-chain floor), not with the
-  plan's own quote; no measured quote refuses the plan.
-- `execute` runs it before any transaction, and again on a plan it rebuilds. With `request`, a
-  plan built for another request is now refused instead of signed.
-- `execute({ plan })` without `request` is stricter: the recipient must be your wallet's account,
-  the approval exact, the deadline within the client's `deadlineSec`, and the minimum is floored
-  with the client's `slippageBps` (the plan's own `slippageBps` is not used). `execute` signs a copy
-  of the plan taken when it is called; a plan that is not plain data (getters, a Proxy, a class
-  instance, bigints as strings) throws `bad_request`.
-- `buildSwap`: `plan.minOut` is the minimum actually signed when the Quoter encoded a higher one.
-- `buildSwap({ exact: true })`: the signed minimum is never above `exactOut` less the 50 bps
-  safety margin, and never below the default minimum. Where the default path's minimum sat above
-  the dry-run, the swap was signed to revert; such a request is now refused with
-  `min_above_exact` (the default minimum is the quote net of `slippageBps`, never under the
-  on-chain floor), so `execute` never signs it and `verifyPlan` never sees a minimum under the
-  quote's floor.
-- A revert is told from a node failure by what the error is (its class, JSON-RPC code 3), not
-  by its text. A revert reason reading "429" or "rate limit" is reported as a revert, and a
-  node answering 429 / 5xx / timeout inside `simulate` is reported as `rpc_error`.
-- `execute`: the allowance read and both receipt waits fail as a `BlazeError` `rpc_error`
-  whose message never carries the RPC URL; a receipt failure names the transaction that was sent.
+Some of these functions are already prepared for the V2 DEX and the V4 staking engine;
+the live contracts they read today are unchanged.
+
+- `decodeRouterControlLog` reads the Router's rescue and renunciation logs in every
+  version's form: `RescueCancelled(token, to)` and `ControlRenounced()` (2.x), and the
+  legacy `RescueQueued(token, to, 0)` and `Cfg(0, address(0))`. The live 1.0.0 Routers
+  have no rescue door and renounce with `Cfg(0, address(0))`. Exported with
+  `ROUTER_CONTROL_EVENTS_ABI` and the topic0 constants `RESCUE_QUEUED_TOPIC0`,
+  `RESCUE_CANCELLED_TOPIC0`, `CFG_TOPIC0` and `CONTROL_RENOUNCED_TOPIC0`. The Hub and the
+  Gate emit the same `ControlRenounced()` topic, so filter logs by Router address.
+- ABIs regenerated from BlazePhoenix-Dex `c5ca6c9`: `ROUTER_ABI` gains `RescueCancelled` and
+  `ControlRenounced`. `previewAndEncode` and `previewAndEncodeWithMinOut` stay `view` in the
+  ABI (eth_call only), like `previewPlanExact`.
 
 ## 1.2.1 — one meaning per field
 

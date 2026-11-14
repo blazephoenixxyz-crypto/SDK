@@ -36,7 +36,6 @@ export type BlazeErrorCode =
   | 'no_route'
   | 'not_executable'
   | 'calldata_mismatch'
-  | 'plan_mismatch'
   | 'min_implausible'
   | 'min_above_exact'
   | 'deployment_unverified'
@@ -147,18 +146,9 @@ export function decodeBlazeError(err: unknown): DecodedError | undefined {
 }
 
 /** True when the error is a node refusing to serve (network / 429 / 5xx),
- *  as opposed to the contract answering with a revert. A revert is told by what the
- *  error is (its class, JSON-RPC code 3), never by its text: the reason is chosen by a
- *  token, and one that reads "429" or "rate limit" is still a revert. */
+ *  as opposed to the contract answering with a revert. */
 export function isTransportError(err: unknown): boolean {
-  if (decodeBlazeError(err)) return false;
-  let words = false;
-  for (let cur: unknown = err; cur && typeof cur === 'object'; cur = (cur as { cause?: unknown }).cause) {
-    const e = cur as { name?: unknown; code?: unknown; message?: unknown };
-    const name = String(e.name ?? '');
-    if (name === 'ExecutionRevertedError' || name === 'ContractFunctionRevertedError' || e.code === 3) return false;
-    if (name === 'HttpRequestError' || name === 'TimeoutError' || name === 'WebSocketRequestError') return true;
-    words ||= /fetch failed|ECONN|ETIMEDOUT|429|rate limit/i.test(String(e.message ?? ''));
-  }
-  return words;
+  const s = String((err as { name?: string })?.name ?? '') + ' ' + String((err as Error)?.message ?? '');
+  return /HttpRequestError|TimeoutError|WebSocketRequestError|fetch failed|ECONN|ETIMEDOUT|429|rate limit/i.test(s)
+    && !decodeBlazeError(err);
 }

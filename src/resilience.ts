@@ -10,49 +10,36 @@
 //
 //  Execution-grade requests (recipient / exact=1) are never TTL-cached here,
 //  mirroring the server's own red line.
-//
-//  The state lives in a SCOPE (any object: a client, a fetch function). Work
-//  and answers are shared only inside one scope, so two clients on two nodes
-//  never answer each other. Without a scope, the shared DEFAULT one is used.
 // =============================================================================
 
-interface Bucket { inflight: Map<string, Promise<unknown>>; mem: Map<string, { at: number; data: unknown }> }
-let SCOPES = new WeakMap<object, Bucket>();
-const DEFAULT = {};
-
-function bucket(scope: object = DEFAULT): Bucket {
-  let b = SCOPES.get(scope);
-  if (!b) SCOPES.set(scope, (b = { inflight: new Map(), mem: new Map() }));
-  return b;
-}
+const INFLIGHT = new Map<string, Promise<unknown>>();
+const MEM = new Map<string, { at: number; data: unknown }>();
 
 /** Coalesce concurrent identical work — leader runs, followers share. */
-export async function singleflight<T>(key: string, fn: () => Promise<T>, scope?: object): Promise<T> {
-  const { inflight } = bucket(scope);
-  const existing = inflight.get(key) as Promise<T> | undefined;
+export async function singleflight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = INFLIGHT.get(key) as Promise<T> | undefined;
   if (existing) return existing;
   const flight = fn();
-  inflight.set(key, flight as Promise<unknown>);
+  INFLIGHT.set(key, flight as Promise<unknown>);
   try {
     return await flight;
   } finally {
-    inflight.delete(key);
+    INFLIGHT.delete(key);
   }
 }
 
-export function memGet(key: string, ttlMs: number, now = Date.now(), scope?: object): unknown | undefined {
+export function memGet(key: string, ttlMs: number, now = Date.now()): unknown | undefined {
   if (ttlMs <= 0) return undefined;
-  const hit = bucket(scope).mem.get(key);
+  const hit = MEM.get(key);
   return hit && now - hit.at < ttlMs ? hit.data : undefined;
 }
 
-export function memPut(key: string, data: unknown, now = Date.now(), scope?: object): void {
-  const { mem } = bucket(scope);
-  mem.set(key, { at: now, data });
+export function memPut(key: string, data: unknown, now = Date.now()): void {
+  MEM.set(key, { at: now, data });
   // Bound the cache — a long-running bot must never leak memory here.
-  if (mem.size > 500) {
-    const oldest = mem.keys().next().value;
-    if (oldest !== undefined) mem.delete(oldest);
+  if (MEM.size > 500) {
+    const oldest = MEM.keys().next().value;
+    if (oldest !== undefined) MEM.delete(oldest);
   }
 }
 
@@ -112,5 +99,6 @@ export async function resilientFetch(
 
 /** Test hook. */
 export function __resetResilience(): void {
-  SCOPES = new WeakMap();
+  INFLIGHT.clear();
+  MEM.clear();
 }

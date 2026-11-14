@@ -7,7 +7,7 @@
 //  as a bot.
 //
 //  Commands:
-//    /price [SYM]            → 1 WETH → SYM quote (default USDC)
+//    /price [SYM]            → 1 WETH → SYM quote (default BZPX)
 //    /quote AMT IN OUT       → full quote: output, impact, gas + swap button
 //    /watch                  → stream every BlazePhoenix fill on the chat's chain
 //    /stop                   → stop the stream
@@ -364,11 +364,9 @@ function marketLine(m: Market | null): string {
 // The SDK never guesses a token from a ticker (a ticker is not an identity). The
 // bot does, the way the old API did: the deepest pool on the chat's chain wins,
 // and the address it picked is SHOWN on every card so nobody trades blind.
-const BUILTIN = new Set(['ETH', 'WETH', 'USDC', 'USDG']);
+const BUILTIN = new Set(['ETH', 'WETH', 'USDC', 'USDG', 'BZPX']);
 async function tokenRef(sym: string, dexChain: string): Promise<string> {
   if (/^0x[0-9a-fA-F]{40}$/.test(sym) || BUILTIN.has(sym.toUpperCase())) return sym;
-  // BZPX: coming soon. Never resolve it by ticker: any pool named BZPX today is not ours.
-  if (sym.toUpperCase() === 'BZPX') throw new Error('BZPX: coming soon — the token address is not published yet; pass a token address');
   const m = await market(sym, dexChain);
   if (m?.token?.address) return m.token.address;
   throw new Error(`unknown token ${sym} — pass its 0x address`);
@@ -520,7 +518,7 @@ bot.callbackQuery(/^slip:(.+)$/, async (ctx) => {
 });
 
 bot.command('price', async (ctx) => {
-  const sym = (ctx.match || 'USDC').trim().toUpperCase();
+  const sym = (ctx.match || 'BZPX').trim().toUpperCase();
   const ch = chainOf(ctx);
   try {
     const q = await blaze.quote({
@@ -610,7 +608,7 @@ async function sendTokenCall(ctx: any, sym: string, chainKey?: string) {
 
 bot.command(['token', 'call'], (ctx) => {
   const sym = (ctx.match || '').trim().toUpperCase();
-  if (!sym) return ctx.reply('usage: /token USDC  — a shareable card about a token');
+  if (!sym) return ctx.reply('usage: /token BZPX  — a shareable card about a token');
   return sendTokenCall(ctx, sym);
 });
 
@@ -679,7 +677,7 @@ bot.command(['hot', 'radar', 'trending'], async (ctx) => {
     kb.text(`${['🥇', '🥈', '🥉'][i] ?? '•'} ${t.symbol}`.slice(0, 20), `call:${key}:${t.symbol}`);
     if (i % 2 === 1) kb.row();
   });
-  kb.row().webApp('📡 Full Radar', `${BRAND.site}/radar`).switchInline('📢 Share', 'USDC');
+  kb.row().webApp('📡 Full Radar', `${BRAND.site}/radar`).switchInline('📢 Share', 'BZPX');
 
   await ctx.reply(
     card('🔥 Hot tokens · most traded',
@@ -921,7 +919,7 @@ const ABOUT = card(
   + '• <b>Phoenix Check</b> — a deterministic (no-AI) safety verdict on every quote, fails closed.\n'
   + '• <b>Pool X-Ray</b> — real vs advertised liquidity, so phantom depth can\'t trap you.\n'
   + '• <b>Fee 0.28%</b> on quoted output; execution surplus is fee-exempt → goes to <b>you</b>.\n'
-  + '• <b>BZPX</b> — coming soon. Proof-of-solvency: coming soon.\n\n'
+  + '• <b>BZPX</b> — the protocol token on Base; staking backs a live on-chain <code>isSolvent()</code> proof.\n\n'
   + 'Ask me anything: <code>/ask is it safe?</code>',
   'Compute, don\'t trust.',
 );
@@ -965,10 +963,10 @@ const KB: QA[] = [
     a: 'Price impact is the cost you cause yourself by trading against a finite pool — knowable before you sign. Slippage is the market moving after you sign, which the floor caps.',
     more: `${BRAND.site}/learn/price-impact-explained` },
   { keys: ['bzpx', 'token', 'tokenomics', 'supply'],
-    a: 'BZPX: coming soon — the token address is not published yet. Proof-of-solvency: coming soon.',
+    a: 'BZPX is the protocol token, deployed on Base. Staking it backs a live on-chain isSolvent() proof you can read yourself.',
     more: `${BRAND.site}/solvency` },
   { keys: ['stake', 'staking', 'rewards', 'apr', 'yield'],
-    a: 'Staking and proof-of-solvency: coming soon.',
+    a: 'Staking backs the protocol\'s solvency proof; the staking contract exposes isSolvent() on Base so anyone can verify it on-chain.',
     more: `${BRAND.site}/solvency` },
   { keys: ['kyc', 'signup', 'account', 'register', 'permission'],
     a: 'No KYC, no signup, no account. It is self-custodial and permissionless — you connect a wallet and trade.' },
