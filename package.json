@@ -1,6 +1,6 @@
 {
   "name": "@blazephoenix/sdk",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, verify and execute swaps 100% on YOUR RPC (no API in the read path, no key, no endpoints shipped). Versioned deployments (1.x live; 2.x pending: Router, Solver, Hub, Quoter, Gate). Base, Ethereum, Optimism, Arbitrum, Robinhood Chain.",
   "keywords": [
     "blazephoenix",
