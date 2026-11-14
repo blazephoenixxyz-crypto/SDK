@@ -23,8 +23,12 @@ export {
 export {
   API_BASE, DEPLOYMENTS_URL, CHAINS, SUPPORTED_CHAIN_IDS, NATIVE_TOKEN, PERMIT2, ZERO_ADDRESS, FEE_BPS,
   SWAP_TOPIC0, SURPLUS_TOPIC0, EXECUTION_PROOF_TOPIC0, FEE_TOPIC0, resolveChain,
+  RESCUE_QUEUED_TOPIC0, RESCUE_CANCELLED_TOPIC0, CFG_TOPIC0, CONTROL_RENOUNCED_TOPIC0,
   type ChainInfo, type SupportedChainId,
 } from './constants.js';
+export {
+  ROUTER_CONTROL_EVENTS_ABI, decodeRouterControlLog, type RouterControlEvent,
+} from './controlEvents.js';
 export {
   QUOTER_ABI, ROUTER_ABI, SOLVER_ABI, HUB_ABI, CORE_ABI, BLAZE_ERRORS_ABI, ABI_SOURCE_REVISION,
   ERC20_ABI, WETH_ABI, STAKING_SOLVENCY_ABI,
@@ -34,7 +38,6 @@ export {
   verifySwapExactIn, tightenMinOut, minOutFor, routeFingerprint,
   type DecodedSwapExactIn, type SwapExpectation,
 } from './calldata.js';
-export { verifyPlan, type PlanExpectation, type VerifiedPlan } from './verify.js';
 export { phoenixCheck, routeIsConsistent, HARD_IMPACT_BPS, CAUTION_IMPACT_BPS } from './checks.js';
 export {
   BlazeError, decodeBlazeError, decodeRevertData, describeProtocolError,

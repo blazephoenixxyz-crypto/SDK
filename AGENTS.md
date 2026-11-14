@@ -32,7 +32,7 @@ npm test
 If you are asked about the project rather than asked to change the code:
 
 - Start from the project's [`llms.txt`](https://blazephoenix.xyz/llms.txt) and the [reading guide](https://blazephoenix.xyz/reading-guide.md), which give the reading order for each level of reader.
-- For contract behaviour, the contract source in [Blaze-Phoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) takes precedence over any summary, including the website's. For live numbers (quotes, fills), read the chain through this SDK or the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp), not dated text.
+- For contract behaviour, the contract source in [Blaze-Phoenix-Dex](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex) takes precedence over any summary, including the website's. For live numbers (quotes, solvency, fills), read the chain through this SDK or the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp), not dated text.
 - Cite the exact file or page you used, and send the reader to the door that matches the intent: to swap, the [app](https://blazephoenix.xyz/?tab=swap); to integrate, this SDK or the MCP server; to verify, [Trust and verification](https://blazephoenix.xyz/trust).
 
 ## Licence

@@ -27,9 +27,8 @@ export interface ChainInfo {
   weth: `0x${string}`;
   /** The chain's canonical dollar asset (USDG on Robinhood Chain). */
   usdc: `0x${string}`;
-  /** BZPX token. Unset everywhere: BZPX is coming soon and its address is not published yet. */
   bzpx?: `0x${string}`;
-  /** BlazePhoenix staking engine, where one is registered. */
+  /** BlazePhoenix staking engine, where live. */
   staking?: `0x${string}`;
   /** Approximate seconds per block — used to size log scans. */
   blockTime: number;
@@ -52,6 +51,7 @@ export const CHAINS: Record<SupportedChainId, ChainInfo> = {
     explorer: 'https://basescan.org',
     weth: '0x4200000000000000000000000000000000000006',
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    bzpx: '0x053D75c00FdD571538492e3B1686Bd963a0911A7',
     blockTime: 2,
   },
   10: {
@@ -136,3 +136,15 @@ export const EXECUTION_PROOF_TOPIC0 =
 /** 2.x routers: what was charged, in which token, split between treasuries. */
 export const FEE_TOPIC0 =
   '0x18fa25e22e0f1f39ef2130081363ba86a1259e598e669558683dabfc15bfe731' as const;
+/** 2.x routers: queueRescue (1.x routers have no rescue). Pre-rename 2.x: cancelRescue too, with eta 0. */
+export const RESCUE_QUEUED_TOPIC0 =
+  '0x1e1dbbf37b1db47a5db3cfb411eabf2ce767cf91bd75561faffe72cb88a20693' as const;
+/** 2.x routers: cancelRescue. */
+export const RESCUE_CANCELLED_TOPIC0 =
+  '0x4f1fdfc7f46782301e5022fc97f9df6f9b7f80a8a5bfc78eeaef4de1845b628a' as const;
+/** Every router: the setters. 1.x and pre-rename 2.x routers: renounceControl too, as Cfg(0, address(0)). */
+export const CFG_TOPIC0 =
+  '0xee4d365fc44f0e60c9f47c62bdbe8ffb8c856355804d449cc18dcb5a282f470b' as const;
+/** 2.x routers: renounceControl (the Hub and the Gate emit the same topic). */
+export const CONTROL_RENOUNCED_TOPIC0 =
+  '0x3b0cda0c58f80b51ae87c69183b6e19775f26af5c103b33a48d40caa709d4861' as const;

@@ -9,14 +9,14 @@ const blaze = new BlazePhoenix({ rpc: { base: process.env.BASE_RPC_URL! } });
 
 bot.command('price', async (ctx) => {
   try {
-    const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amount: '1' });
+    const q = await blaze.quote({ chain: 'base', tokenIn: 'WETH', tokenOut: 'BZPX', amount: '1' });
     await ctx.reply(
-      `1 WETH → ${fromBaseUnits(q.amountOut, 6, 2)} USDC (impact ${q.checks.priceImpact.bps} bps · ${q.checks.verdict})`,
+      `1 WETH → ${fromBaseUnits(q.amountOut, 18, 2)} BZPX (impact ${q.checks.priceImpact.bps} bps · ${q.checks.verdict})`,
       {
         reply_markup: {
           inline_keyboard: [[{
             text: '⚡ Swap on BlazePhoenix',
-            url: deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'USDC' }),
+            url: deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'BZPX' }),
           }]],
         },
       },

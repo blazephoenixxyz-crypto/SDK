@@ -15,7 +15,7 @@ npm i @blazephoenix/sdk viem
 
 ## BlazePhoenix in one sentence
 
-BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine (proof-of-solvency: coming soon). V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
+BlazePhoenix is the fully on-chain DEX aggregator — the route is computed inside the transaction that executes it — paired with an oracle-free staking engine that proves its own solvency on every transaction. V2, the generation now in development, targets Base, Optimism, Arbitrum, Robinhood Chain and further L2s and is not planned for Ethereum L1. The V1 generation deployed today runs on Base, Ethereum, Optimism, Arbitrum and Robinhood Chain.
 
 **Swap** in the [app](https://blazephoenix.xyz/?tab=swap) · **integrate** with the [SDK](https://github.com/blazephoenixxyz-crypto/SDK) (`npm i @blazephoenix/sdk`) · **connect an agent** to the [MCP server](https://github.com/blazephoenixxyz-crypto/blazephoenix-mcp) (`https://blazephoenix.xyz/mcp`, no key)
 
@@ -64,8 +64,7 @@ const plan = await blaze.buildSwap({
 });
 plan.steps;       // [approve?, swap] — { chainId, to, data, value }
 plan.minOut;      // the minimum the Router will enforce for you
-                  // (your userMinOut as given, when set, refused below the quote net of slippage;
-                  // otherwise the quote net of slippage, never under the on-chain floor)
+                  // (your userMinOut as given, when set; refused below the quote net of slippage)
 plan.encodedBy;   // 'quoter' on 2.x (the Quoter's own bytes, verified) · 'sdk' on 1.x
 
 // 3) optional: dry-run on your node, then execute with YOUR wallet
@@ -81,20 +80,6 @@ call from the account that will send them: `simulate(plan, from)`, `buildSwap({ 
 `{ ok: false, error.name: 'allowance' }`; send the approval, then simulate again before the swap.
 
 `execute` takes a viem `WalletClient`. The SDK never asks for, stores or touches a key.
-
-A plan is a plain object and may have crossed a process, a queue or an LLM before it is signed.
-`execute` re-checks it from its bytes before any transaction (`blaze.verifyPlan(plan, request?, signer?)`,
-or the pure `verifyPlan(plan, expectation)`): Router of the deployment this SDK resolves, function,
-tokens, amount, value, recipient, deadline, a minimum at least what your slippage implies, the
-approval's token, spender and amount, and canonical calldata. The minimum is checked against a
-quote `blaze.verifyPlan` measures on your RPC (one eth_call; it allows your slippage once for the
-price moving since the plan was quoted), never against the plan's own quote; if that read fails or
-finds no executable route, the plan is refused. Pass `request` to check against what you asked
-for. Without it, only the pair and the size are the plan's: the recipient must be the signer
-(`execute` passes your wallet's account), the approval exact, the deadline within this client's
-`deadlineSec` and the slippage this client's `slippageBps`. `execute` verifies, simulates and signs
-one copy of the plan, taken when it is called; a plan that is not plain data (getters, a Proxy, a
-class instance, bigints as strings after JSON) is refused with `bad_request`.
 
 ## Your RPC, your way
 
@@ -188,7 +173,7 @@ await blaze.quoteBatch([req1, req2]); // per-item { ok, quote } | { ok:false, er
 await blaze.getFills({ chain: 'base', lookbackBlocks: 5_000n }); // Swap (+ ExecutionProof on 2.x)
 const stop = await blaze.watchFills({ chain: 'base', onFill: console.log });
 await blaze.tokenInfo('base', '0x…');  // symbol / name / decimals
-await blaze.solvency();                // proof-of-solvency: coming soon; `not_deployed` where no engine is registered
+await blaze.solvency();                // staking proof-of-solvency; `not_deployed` where no engine is registered
 toJSON(quote);                         // bigint → string, for HTTP / queues / LLMs
 ```
 
@@ -198,8 +183,7 @@ Pure helpers (no RPC): `buildApproveTx`, `buildWrapTx`, `buildUnwrapTx`, `permit
 `decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`.
 
 Tokens: `0x` addresses, or the universal symbols `ETH` (native), `WETH`, `USDC` (the chain's
-dollar asset — USDG on Robinhood). BZPX: coming soon — its address is not published yet, so the
-symbol is refused. Anything else: pass the address. The SDK never
+dollar asset — USDG on Robinhood), `BZPX`. Anything else: pass the address. The SDK never
 guesses a token from a ticker.
 
 ## Errors
@@ -215,9 +199,8 @@ Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; pr
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
 | `not_executable` | the Quoter's swap math says the route cannot execute now (`canExecute = false`), or, with `simulate: true`, the Router's eth_call from `from` reverts |
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
-| `plan_mismatch` | `verifyPlan` / `execute`: the plan's bytes do not execute what you asked for (`details.fields` names each field) — nothing was sent |
 | `min_implausible` | `buildSwap`: `userMinOut` below the quote net of `slippageBps` (or the on-chain floor) |
-| `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut`, or the default minimum (the quote net of `slippageBps`, or the on-chain floor), above `exactOut` less the 50 bps safety margin |
+| `min_above_exact` | `buildSwap({ exact: true })`: `userMinOut` above `exactOut` less the 50 bps safety margin |
 | `deployment_unverified` | a registry deployment failed on-chain verification |
 | `unsupported_by_version` | e.g. native ETH input on a 1.x Router |
 | `not_deployed` / `bad_request` / `wallet_chain_mismatch` / `reverted` | as named |
