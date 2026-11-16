@@ -15,6 +15,9 @@ the live contracts they read today are unchanged.
 - ABIs regenerated from BlazePhoenix-Dex `c5ca6c9`: `ROUTER_ABI` gains `RescueCancelled` and
   `ControlRenounced`. `previewAndEncode` and `previewAndEncodeWithMinOut` stay `view` in the
   ABI (eth_call only), like `previewPlanExact`.
+- A token's `decimals()` is read on your node for every human `amount` and every `tokenInfo`
+  call, and is no longer remembered for the life of the client. A token whose decimals change
+  at the same address (a proxy upgrade, or a redeploy) is now sized in its current units.
 
 ## 1.2.1 — one meaning per field
 

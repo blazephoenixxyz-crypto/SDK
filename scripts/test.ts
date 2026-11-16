@@ -838,6 +838,39 @@ console.log('client · execute');
   } finally { Date.now = realNow; }
 }
 
+// ── decimals are read, not remembered ────────────────────────────────────────
+console.log('client · decimals');
+{
+  // One instance, one chain, one token address whose decimals() changes under it
+  // (a proxy upgrade, or a redeploy at the same address). Every human amount is
+  // converted with the decimals the node answers now. Red on 77c9522.
+  // Default cacheTtlMs on purpose: a time-boxed memo would also serve the old value.
+  const o: MockOpts = { decimals: 18 };
+  const { provider, calls } = mockProvider(o);
+  const blaze = new BlazePhoenix({ rpc: { base: provider }, registry: { mode: 'embedded' } });
+  const reads = () => calls.filter((c) => c.fn === 'erc20.decimals').length;
+  const seen: [number, bigint, number][] = [];
+  for (const d of [18, 6, 0, 24, 18]) {
+    o.decimals = d;
+    const q = await blaze.quote({ chain: 'base', tokenIn: USDC, tokenOut: 'WETH', amount: '1' });
+    seen.push([d, q.amountIn, (await blaze.tokenInfo('base', USDC)).decimals]);
+  }
+  eq('quote and tokenInfo follow decimals() as the node answers it now (18, 6, 0, 24, 18)', seen,
+    [[18, 10n ** 18n, 18], [6, 10n ** 6n, 6], [0, 1n, 0], [24, 10n ** 24n, 24], [18, 10n ** 18n, 18]]);
+
+  o.decimals = 6;
+  const before = reads();
+  const plan = await blaze.buildSwap({ chain: 'base', tokenIn: USDC, tokenOut: 'WETH', amount: '1', recipient: ME, from: ME, deadline: 2_000_000_000n });
+  eq('buildSwap after the change: quote and calldata carry 1e6, not 1e18',
+    [plan.quote.amountIn, decodeSwapExactIn(plan.tx.data).amountIn], [10n ** 6n, 10n ** 6n]);
+  check('buildSwap read decimals() on the node for this request', reads() > before);
+  const agree = await blaze.quote({ chain: 'base', tokenIn: USDC, tokenOut: 'WETH', amount: '1', amountIn: 10n ** 6n })
+    .then((q) => q.amountIn, (e: Error) => e.message);
+  eq('amount and amountIn are compared at the current decimals', agree, 10n ** 6n);
+  await throwsCode('amount = 1 and amountIn = 1e18 disagree once decimals() is 6',
+    () => blaze.quote({ chain: 'base', tokenIn: USDC, tokenOut: 'WETH', amount: '1', amountIn: 10n ** 18n }), 'bad_request');
+}
+
 // ── ERC-20 helpers ───────────────────────────────────────────────────────────
 console.log('erc20');
 {

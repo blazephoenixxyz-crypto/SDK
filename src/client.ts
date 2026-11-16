@@ -136,7 +136,6 @@ export class BlazePhoenix {
   private readonly deadlineSec: number;
   private readonly batchChunk: number;
   private readonly verified = new Map<string, Promise<void>>();
-  private readonly decimals = new Map<string, Promise<number>>();
 
   constructor(opts: ClientOptions = {}) {
     this.rpc = new RpcRouter(opts.rpc ?? rpcFromEnv(), opts);
@@ -261,16 +260,12 @@ export class BlazePhoenix {
       `${side}: "${ref}" is not a 0x address or a built-in symbol (ETH, WETH, ${chainId === 4663 ? 'USDG' : 'USDC'}, BZPX) on ${c.name} — pass the token address`);
   }
 
-  private async decimalsOf(client: PublicClient, chainId: number, t: ResolvedToken): Promise<number> {
+  // Read on every call, never remembered: a token's decimals() can change at the
+  // same address (proxy upgrade, redeploy), and a remembered value would size the
+  // swap in the old units.
+  private async decimalsOf(client: PublicClient, t: ResolvedToken): Promise<number> {
     if (t.native) return 18;
-    const key = `${chainId}|${t.address.toLowerCase()}`;
-    let p = this.decimals.get(key);
-    if (!p) {
-      p = client.readContract({ address: t.address, abi: ERC20_ABI, functionName: 'decimals' }).then(Number);
-      p.catch(() => this.decimals.delete(key));
-      this.decimals.set(key, p);
-    }
-    return p;
+    return Number(await client.readContract({ address: t.address, abi: ERC20_ABI, functionName: 'decimals' }));
   }
 
   private async amountOf(client: PublicClient, chainId: number, req: QuoteRequest, tIn: ResolvedToken): Promise<bigint> {
@@ -281,7 +276,7 @@ export class BlazePhoenix {
       else throw new BlazeError('bad_request', 'amountIn must be an integer in base units — use `amount` for human units ("1.5")');
       // Both spellings of the amount in one request must agree: no silent precedence.
       if (req.amount !== undefined && req.amount !== null && req.amount !== '') {
-        const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
+        const d = await this.decimalsOf(client, tIn).catch((e: unknown) => {
           throw new BlazeError('bad_request', 'amount and amountIn are both set and the decimals could not be read to compare them — pass only one', { cause: e });
         });
         let human: bigint;
@@ -291,7 +286,7 @@ export class BlazePhoenix {
         }
       }
     } else if (req.amount !== undefined) {
-      const d = await this.decimalsOf(client, chainId, tIn).catch((e: unknown) => {
+      const d = await this.decimalsOf(client, tIn).catch((e: unknown) => {
         throw new BlazeError('bad_request', `could not read decimals of ${tIn.address} on your RPC — pass amountIn in base units`, { cause: e });
       });
       try { v = toBaseUnits(req.amount, d); } catch (e) { throw new BlazeError('bad_request', (e as Error).message); }
@@ -747,7 +742,7 @@ export class BlazePhoenix {
       const [symbol, name, decimals] = await Promise.all([
         client.readContract({ address: t.address, abi: ERC20_ABI, functionName: 'symbol' }).catch(() => '?'),
         client.readContract({ address: t.address, abi: ERC20_ABI, functionName: 'name' }).catch(() => ''),
-        this.decimalsOf(client, chainId, t),
+        this.decimalsOf(client, t),
       ]);
       return { chainId, address: t.address, symbol, name, decimals, native: false };
     } catch (e) {
