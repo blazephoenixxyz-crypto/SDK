@@ -4,8 +4,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeEventTopics, encodeFunctionResult,
-  getAbiItem, toEventSelector, toFunctionSelector, type AbiFunction,
+  decodeErrorResult as viemDecodeError, decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeEventTopics, encodeFunctionResult,
+  getAbiItem, parseAbi, toEventSelector, toFunctionSelector, type AbiFunction,
 } from 'viem';
 import { formatAbiItem } from 'viem/utils';
 import { ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI } from '../src/abis.js';
@@ -19,7 +19,7 @@ import {
   decodeSwapExactIn, encodeSwapExactIn, minOutFor, tightenMinOut, verifySwapExactIn,
 } from '../src/calldata.js';
 import { phoenixCheck } from '../src/checks.js';
-import { BlazeError, decodeRevertData, untrustedText } from '../src/errors.js';
+import { BlazeError, decodeBlazeError, decodeRevertData, untrustedText } from '../src/errors.js';
 import { BlazePhoenix, deepLink } from '../src/client.js';
 import { toJSON } from '../src/json.js';
 import type { Address, Hex, Preview, Route } from '../src/types.js';
@@ -32,6 +32,13 @@ function check(name: string, ok: boolean, detail?: string) {
 function eq<T>(name: string, got: T, want: T) {
   const s = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? `${x}n` : x));
   check(name, Object.is(got, want) || s(got) === s(want), `got ${s(got)}, want ${s(want)}`);
+}
+function causeTextOf(e: unknown): string {
+  const out: string[] = [];
+  for (let c: unknown = e, i = 0; c && i < 16; c = (c as { cause?: unknown }).cause, i++) {
+    out.push(String((c as Error)?.message ?? c), JSON.stringify(c, Object.getOwnPropertyNames(c as object)) ?? '');
+  }
+  return out.join('\n');
 }
 async function throwsCode(name: string, fn: () => unknown, code: string) {
   try { await fn(); check(name, false, 'did not throw'); }
@@ -836,6 +843,48 @@ console.log('client · execute');
     check('execute: plan aged during the approval + request → rebuilt, then swapped',
       res2.plan.quote.quotedAt > fresh.quote.quotedAt && sent.length - n1 === 2 && res2.status === 'success');
   } finally { Date.now = realNow; }
+
+  // Error contract inside execute(): a read that fails after a transaction was sent is a
+  // BlazeError rpc_error that still names the hash, and never carries the RPC key.
+  // The node answers the mined transaction, so viem's waiter goes straight to the receipt read
+  // and rejects on its failure (with eth_getTransactionByHash → null it would poll until timeout).
+  {
+    const leak = 'HTTP request failed.\n\nURL: https://base-mainnet.example.com/v2/SECRETKEY\nDetails: fetch failed';
+    const mined = (hash: string) => ({
+      hash, blockHash: `0x${'33'.repeat(32)}`, blockNumber: '0x201', transactionIndex: '0x0', from: account.address, to: V1.router,
+      nonce: '0x0', gas: '0x1', value: '0x0', input: '0x', type: '0x2', chainId: '0x2105', maxFeePerGas: '0x1', maxPriorityFeePerGas: '0x1',
+    });
+    const faulty = (fails: (method: string, params: unknown[]) => boolean) => new BlazePhoenix({
+      rpc: { base: { request: async (a: { method: string; params?: unknown }) => {
+        if (fails(a.method, (a.params ?? []) as unknown[])) throw new Error(leak);
+        if (a.method === 'eth_getTransactionByHash') return mined((a.params as string[])[0]);
+        return node.request(a as never);
+      } } }, registry: { mode: 'embedded' }, retries: 0 });
+    const req2 = { tokenIn: 'WETH', tokenOut: 'USDC', amount: '1', recipient: account.address, from: account.address };
+    const isAllowance = (m: string, p: unknown[]) => m === 'eth_call' && String((p[0] as { data?: string })?.data ?? '').startsWith('0xdd62ed3e');
+    const cases: [string, bigint, (m: string, p: unknown[]) => boolean, string | undefined][] = [
+      ['allowance read before the approval', 0n, isAllowance, undefined],
+      ['approval receipt', 0n, (m) => m === 'eth_getTransactionReceipt', 'approvalHash'],
+      ['swap receipt', 2n ** 255n, (m) => m === 'eth_getTransactionReceipt', 'hash'],
+    ];
+    for (const [label, start, fails, key] of cases) {
+      allowance = start;
+      const plan = await blaze.buildSwap(req2);
+      const n0 = sent.length;
+      try {
+        await Promise.race([faulty(fails).execute({ wallet, plan }), new Promise((_r, j) => setTimeout(() => j(new Error('no answer within 20s')), 20_000))]);
+        check(`execute: ${label} failure is rpc_error`, false, 'did not throw');
+      } catch (e) {
+        const be = e as BlazeError;
+        const sentHash = key ? (be.details as Record<string, unknown> | undefined)?.[key] : undefined;
+        check(`execute: ${label} failure is rpc_error without the key${key ? `, ${key} kept` : ''}`,
+          be instanceof BlazeError && be.code === 'rpc_error' && !causeTextOf(be).includes('SECRETKEY')
+          && (key === undefined || (typeof sentHash === 'string' && sent.length > n0 && /^0x[0-9a-f]{64}$/.test(sentHash))),
+          `${(e as Error)?.name} ${be?.code}: ${String((e as Error)?.message).slice(0, 120)}`);
+      }
+    }
+    allowance = 0n;
+  }
 }
 
 // ── decimals are read, not remembered ────────────────────────────────────────
@@ -899,6 +948,205 @@ console.log('misc');
   const [a, b] = await Promise.all([singleflight('k', slow), singleflight('k', slow)]);
   check('singleflight shares one execution', a === 7 && b === 7 && calls === 1);
   eq('deep link', deepLink({ chain: 'base', tokenIn: 'ETH', tokenOut: 'BZPX', amount: '0.5' }), 'https://blazephoenix.xyz/?tab=swap&chain=8453&in=ETH&out=BZPX&amt=0.5');
+}
+
+// ── error contract: every failure of a public method is a BlazeError with a stable code ──
+// Red on e0dc8ba (src/ and scripts/gen-abis.mjs reverted: 264 passed, 117 failed), and the execute()
+// receipt cases in the client · execute section with it.
+console.log('error contract');
+// A transport failure the way an HTTP node reports it: the text quotes the URL it called, key and all.
+const LEAKS = [
+  'HTTP request failed.\n\nURL: https://base-mainnet.example.com/v2/SECRETKEY\nRequest body: {}\nDetails: fetch failed',
+  'HTTP request failed.\n\nStatus: 429\nURL: https://base-mainnet.example.com/v2/SECRETKEY\nDetails: rate limit',
+  'The request took too long to respond.\n\nURL: https://base-mainnet.example.com/v2/SECRETKEY\nDetails: TimeoutError',
+];
+function causeText(e: unknown): string {
+  const out: string[] = [];
+  for (let c: unknown = e, i = 0; c && i < 16; c = (c as { cause?: unknown }).cause, i++) {
+    out.push(String((c as Error)?.message ?? c), JSON.stringify(c, Object.getOwnPropertyNames(c as object)) ?? '');
+  }
+  return out.join('\n');
+}
+async function failsClean(name: string, fn: () => unknown, code?: string) {
+  try { await fn(); check(name, false, 'did not throw'); }
+  catch (e) {
+    check(name, e instanceof BlazeError && (code === undefined || e.code === code) && !causeText(e).includes('SECRETKEY'),
+      `threw ${e instanceof BlazeError ? `BlazeError ${e.code}` : (e as Error)?.name}: ${String((e as Error)?.message).slice(0, 120)}`);
+  }
+}
+/** A node that answers like mockProvider, except that `fails(method, n)` turns the n-th call of `method` into a transport failure. */
+function faultyNode(inner: { request: (a: { method: string; params?: unknown }) => Promise<unknown> }, fails: (method: string, n: number, params: unknown) => boolean, leak: string) {
+  const seen = new Map<string, number>();
+  return {
+    async request(a: { method: string; params?: unknown }) {
+      const n = (seen.get(a.method) ?? 0) + 1;
+      seen.set(a.method, n);
+      if (fails(a.method, n, a.params)) throw new Error(leak);
+      return inner.request(a);
+    },
+  };
+}
+
+// 4745 — getFills: the head-block read is a public RPC read like the getLogs leg.
+for (const leak of LEAKS) {
+  for (const lookbackBlocks of [undefined, 0n, 1n]) {
+    const { provider } = mockProvider();
+    const node = faultyNode(provider, (m) => m === 'eth_blockNumber', leak);
+    const blaze = new BlazePhoenix({ rpc: { base: node }, registry: { mode: 'embedded' }, retries: 0 });
+    await failsClean(`getFills: head-block failure is rpc_error without the key (lookback ${lookbackBlocks ?? 'default'}, ${leak.split('\n')[0].slice(0, 24)})`,
+      () => blaze.getFills({ chain: 'base', ...(lookbackBlocks !== undefined ? { lookbackBlocks } : {}) }), 'rpc_error');
+  }
+}
+{
+  const { provider } = mockProvider();
+  const node = faultyNode(provider, (m) => m === 'eth_blockNumber', LEAKS[0]);
+  const blaze = new BlazePhoenix({ rpc: { base: node }, registry: { mode: 'embedded' }, retries: 0 });
+  eq('getFills: an explicit toBlock never reads the head (control)', (await blaze.getFills({ chain: 'base', fromBlock: 0n, toBlock: 1n })).length, 0);
+  const n2 = faultyNode(provider, (m) => m === 'eth_getLogs', LEAKS[0]);
+  await failsClean('getFills: getLogs failure is rpc_error without the key (control)',
+    () => new BlazePhoenix({ rpc: { base: n2 }, registry: { mode: 'embedded' }, retries: 0 }).getFills({ chain: 'base', fromBlock: 0n, toBlock: 1n }), 'rpc_error');
+}
+// watchFills hands the caller's onError a BlazeError, never the raw transport error.
+{
+  const { provider } = mockProvider();
+  const node = faultyNode(provider, (m) => m === 'eth_blockNumber' || m === 'eth_getLogs' || m === 'eth_newFilter' || m === 'eth_getFilterChanges', LEAKS[0]);
+  const blaze = new BlazePhoenix({ rpc: { base: node }, registry: { mode: 'embedded' }, retries: 0 });
+  const got = await new Promise<unknown>((resolve) => {
+    let stop: (() => void) | undefined;
+    const t = setTimeout(() => { stop?.(); resolve(new Error('no onError within 2s')); }, 2_000);
+    void blaze.watchFills({ chain: 'base', pollMs: 5, onFill: () => {}, onError: (e) => { clearTimeout(t); stop?.(); resolve(e); } }).then((s) => { stop = s; });
+  });
+  check('watchFills: onError receives a BlazeError rpc_error without the key',
+    got instanceof BlazeError && got.code === 'rpc_error' && !causeText(got).includes('SECRETKEY'),
+    `${(got as Error)?.name}: ${String((got as Error)?.message).slice(0, 120)}`);
+}
+// tokenInfo: a node that fails is rpc_error; bad_request stays for a contract that does not answer decimals().
+{
+  const { provider } = mockProvider();
+  const isDecimals = (p: unknown) => String(((p as unknown[])?.[0] as { data?: string })?.data ?? '').startsWith('0x313ce567');
+  const down = new BlazePhoenix({ rpc: { base: faultyNode(provider, (m, _n, p) => m === 'eth_call' && isDecimals(p), LEAKS[0]) }, registry: { mode: 'embedded' }, retries: 0 });
+  await failsClean('tokenInfo: decimals() read failing on the node is rpc_error without the key', () => down.tokenInfo('base', USDC), 'rpc_error');
+  const notErc20 = { request: async (a: { method: string; params?: unknown }) => {
+    if (a.method === 'eth_call' && isDecimals(a.params)) throw Object.assign(new Error('execution reverted'), { code: 3, data: '0x' });
+    return provider.request(a as never);
+  } };
+  await throwsCode('tokenInfo: a contract that reverts decimals() stays bad_request (control)',
+    () => new BlazePhoenix({ rpc: { base: notErc20 }, registry: { mode: 'embedded' }, retries: 0 }).tokenInfo('base', USDC), 'bad_request');
+}
+// Behavioural census: a node failing at any one RPC method never surfaces anything but a BlazeError.
+{
+  const methods = ['eth_blockNumber', 'eth_call', 'eth_getLogs', 'eth_getCode'];
+  const req = { chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, from: EVIL, recipient: EVIL } as const;
+  const calls: [string, (b: BlazePhoenix) => unknown][] = [
+    ['quote', (b) => b.quote(req)],
+    ['quoteExact', (b) => b.quoteExact(req)],
+    ['buildSwap', (b) => b.buildSwap(req)],
+    ['tokenInfo', (b) => b.tokenInfo('base', USDC)],
+    ['getFills', (b) => b.getFills({ chain: 'base' })],
+  ];
+  for (const m of methods) {
+    for (const [name, call] of calls) {
+      const { provider } = mockProvider();
+      const blaze = new BlazePhoenix({ rpc: { base: faultyNode(provider, (x) => x === m, LEAKS[0]) }, registry: { mode: 'embedded' }, retries: 0, cacheTtlMs: 0 });
+      try { await call(blaze); passed++; }
+      catch (e) {
+        check(`census: ${name}() with ${m} failing throws only a BlazeError without the key`,
+          e instanceof BlazeError && !causeText(e).includes('SECRETKEY'), `${(e as Error)?.name}: ${String((e as Error)?.message).slice(0, 100)}`);
+      }
+    }
+  }
+}
+// Static census: every RPC read in src/client.ts sits under a try whose catch wraps it, or carries its own .catch.
+{
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'client.ts'), 'utf8');
+  const site = /\bclient\.(readContract|getBlockNumber|getLogs|waitForTransactionReceipt|call|getCode|getBalance|estimateGas)\(/g;
+  // Helpers whose every caller catches: named here so a new one is a decision, not an accident.
+  // decimalsOf: every caller has its own .catch or try; read(() => …): the verification helper turns a failure into a failed check.
+  const helpers = [/private async decimalsOf\(/];
+  const tryAt: boolean[] = [];
+  const stack: boolean[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') stack.push(/\btry\s*$/.test(src.slice(Math.max(0, i - 8), i)));
+    else if (ch === '}') stack.pop();
+    tryAt[i] = stack.includes(true);
+  }
+  const bad: string[] = [];
+  for (const m of src.matchAll(site)) {
+    const at = m.index!;
+    const line = src.slice(0, at).split('\n').length;
+    const stmt = src.slice(at, src.indexOf(';', at));
+    const fnStart = src.lastIndexOf('\n  ', at);
+    const inHelper = helpers.some((h) => { const k = src.slice(0, at).search(new RegExp(`${h.source}[\\s\\S]*$`)); return k >= 0 && at - k < 400; });
+    const viaRead = src.slice(at - 15, at).includes('read(() => ');
+    if (!tryAt[at] && !stmt.includes('.catch(') && !inHelper && !viaRead && fnStart >= 0) bad.push(`client.ts:${line} ${m[1]}`);
+  }
+  eq('static census: no RPC read in client.ts escapes the error contract', bad, []);
+}
+// 4766 — an unsupported chain is BlazeError bad_chain from every chain-taking method.
+{
+  const { provider } = mockProvider();
+  const blaze = new BlazePhoenix({ rpc: { base: provider }, registry: { mode: 'embedded' }, retries: 0 });
+  for (const chain of ['solana', 999999, '0x2105', '', 'base mainnet']) {
+    await throwsCode(`resolveChain(${JSON.stringify(chain)}) → bad_chain`, () => resolveChain(chain as never), 'bad_chain');
+    for (const [name, fn] of [
+      ['quote', () => blaze.quote({ chain: chain as never, tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n })],
+      ['buildSwap', () => blaze.buildSwap({ chain: chain as never, tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 1n, recipient: EVIL })],
+      ['tokenInfo', () => blaze.tokenInfo(chain as never, 'USDC')],
+      ['solvency', () => blaze.solvency(chain as never)],
+      ['getFills', () => blaze.getFills({ chain: chain as never })],
+      ['resolveDeployment', () => blaze.resolveDeployment({ chain: chain as never })],
+    ] as [string, () => unknown][]) {
+      await throwsCode(`${name}(chain ${JSON.stringify(chain)}) → bad_chain`, fn, 'bad_chain');
+    }
+  }
+  eq('a padded alias still resolves (control)', resolveChain(' base '), 8453);
+  eq('8453 still resolves (control)', resolveChain(8453), 8453);
+  // One question, one name: the hosted API answers the same request with the literal `bad_chain`.
+  const code: import('../src/errors.js').BlazeErrorCode = 'bad_chain';
+  eq('the code is the API literal', code, 'bad_chain');
+}
+// 4731 — decodeRevertData reports a `code` only for an enumerated protocol error or a Panic.
+{
+  const { BLAZE_ERRORS_ABI } = await import('../src/abis.generated.js');
+  // The oracle is the Dex source (c5ca6c9), not the generated table under test.
+  const DEX_ERRORS = parseAbi(['error RouterE(uint16 code)', 'error AdapterE(uint8 code)', 'error GateE(uint8 code)',
+    'error QuoteDeltas(int256 d0, int256 d1)', 'error GateQuoteCall(uint256 out)', 'error InputProbe(bool taxed)']);
+  const enc = (errorName: string, args: unknown[]) => (encodeErrorResult as (x: unknown) => Hex)({ abi: DEX_ERRORS, errorName: errorName as never, args: args as never });
+  const rows: [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }][] = [
+    ['RouterE(5) (control)', enc('RouterE', [5]), { name: 'RouterE', code: 5, reasonHas: 'slippage', contract: 'Router' }],
+    ...Array.from({ length: 10 }, (_, k) => [`AdapterE(${k})`, enc('AdapterE', [k]), { name: 'AdapterE', code: k, reasonHas: k === 9 ? 'amount' : '', contract: 'Adapter' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
+    ...Array.from({ length: 16 }, (_, k) => [`GateE(${k + 1})`, enc('GateE', [k + 1]), { name: 'GateE', code: k + 1, reasonHas: k + 1 === 13 ? 'paid less' : '', contract: 'Gate' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
+    ['QuoteDeltas(-5,3)', enc('QuoteDeltas', [-5n, 3n]), { name: 'QuoteDeltas', reasonHas: 'QuoteDeltas' }],
+    ['InputProbe(true)', enc('InputProbe', [true]), { name: 'InputProbe', reasonHas: 'InputProbe' }],
+    ['GateQuoteCall(2^256-1)', enc('GateQuoteCall', [2n ** 256n - 1n]), { name: 'GateQuoteCall', reasonHas: 'GateQuoteCall' }],
+    ['Error("custom reason")', `0x08c379a0${encodeAbiParameters([{ type: 'string' }], ['custom reason\n\u0007']).slice(2)}` as Hex, { name: 'Error', reasonHas: 'custom reason' }],
+    ['Panic(0x11)', `0x4e487b71${encodeAbiParameters([{ type: 'uint256' }], [0x11n]).slice(2)}` as Hex, { name: 'Panic', code: 0x11, reasonHas: 'Panic' }],
+  ];
+  for (const [label, data, want] of rows) {
+    const forms: [string, unknown][] = [
+      ['hex', { data }],
+      ['nested cause', new Error('outer', { cause: new Error('inner', { cause: { data } }) })],
+    ];
+    for (const [form, err] of forms) {
+      const d = decodeBlazeError(err);
+      check(`decode ${label} (${form}): code ${want.code ?? 'absent'}, reason names it`,
+        !!d && d.name === want.name && d.code === want.code && ('code' in d) === (want.code !== undefined)
+        && (want.reasonHas === '' || d.reason.includes(want.reasonHas)) && (want.contract === undefined || d.contract === want.contract)
+        && /^[\x20-\x7e]*$/.test(d.reason), JSON.stringify(d));
+    }
+    // viem's decoded form: { errorName, args }.
+    const viemForm = (() => { try { return viemDecodeError({ abi: [...DEX_ERRORS, ...(BLAZE_ERRORS_ABI as readonly unknown[])] as never, data }); } catch { return undefined; } })();
+    if (viemForm) {
+      const d = decodeBlazeError({ data: viemForm });
+      check(`decode ${label} (object): code ${want.code ?? 'absent'}`, !!d && d.code === want.code && ('code' in d) === (want.code !== undefined), JSON.stringify(d, (_k, x) => (typeof x === 'bigint' ? `${x}n` : x)));
+    }
+  }
+  // Parity: every custom error the Dex declares (Gate and adapters included) is in the generated table.
+  const names = new Set((BLAZE_ERRORS_ABI as readonly { type: string; name?: string }[]).filter((x) => x.type === 'error').map((x) => x.name));
+  for (const n of ['RouterE', 'QuoterE', 'SolverE', 'HubE', 'GateE', 'AdapterE', 'QuoteDeltas', 'GateQuoteCall', 'InputProbe']) {
+    check(`BLAZE_ERRORS_ABI decodes ${n}`, names.has(n));
+  }
 }
 
 console.log(`\n${failed === 0 ? '✅' : '❌'} ${passed} passed, ${failed} failed\n`);

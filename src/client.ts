@@ -318,18 +318,25 @@ export class BlazePhoenix {
 
   // ── quotes ─────────────────────────────────────────────────────────────────
 
-  private wrapReadError(e: unknown, what: string): never {
-    if (e instanceof BlazeError) throw e;
+  /** The BlazeError for a failed read on your RPC. `details` carries what the caller must not
+   *  lose (the hash of a transaction already sent). */
+  private readError(e: unknown, what: string, details?: Record<string, unknown>): BlazeError {
+    if (e instanceof BlazeError) return e;
+    const d = details ? { details } : {};
     const revert = decodeBlazeError(e);
     if (revert) {
-      throw new BlazeError('no_route', `${what}: ${revert.name}(${revert.code ?? ''}) — ${revert.reason}`, { revert, cause: e });
+      return new BlazeError('no_route', `${what}: ${revert.name}(${revert.code ?? ''}) — ${revert.reason}`, { revert, cause: e, ...d });
     }
     if (isTransportError(e)) {
-      throw new BlazeError('rpc_error', `${what}: your RPC failed (${(e as Error)?.message?.split('\n')[0] ?? e})`, { cause: e });
+      return new BlazeError('rpc_error', `${what}: your RPC failed (${(e as Error)?.message?.split('\n')[0] ?? e})`, { cause: e, ...d });
     }
     const msg = (e as Error)?.message?.split('\n')[0] ?? String(e);
-    if (/revert/i.test(msg)) throw new BlazeError('no_route', `${what}: execution reverted`, { cause: e });
-    throw new BlazeError('rpc_error', `${what}: ${msg}`, { cause: e });
+    if (/revert/i.test(msg)) return new BlazeError('no_route', `${what}: execution reverted`, { cause: e, ...d });
+    return new BlazeError('rpc_error', `${what}: ${msg}`, { cause: e, ...d });
+  }
+
+  private wrapReadError(e: unknown, what: string, details?: Record<string, unknown>): never {
+    throw this.readError(e, what, details);
   }
 
   private buildQuote(ctx: Ctx, tIn: ResolvedToken, tOut: ResolvedToken, amountIn: bigint, pv: Preview, fb: Route | undefined, blockNumber?: bigint): Quote {
@@ -693,10 +700,12 @@ export class BlazePhoenix {
     if (plan.approval) {
       const current = await client.readContract({
         address: plan.approval.token, abi: ERC20_ABI, functionName: 'allowance', args: [account.address, plan.approval.spender],
-      });
+      }).catch((e: unknown) => this.wrapReadError(e, 'allowance'));
       if (current < plan.quote.amountIn) {
         approvalHash = await send(plan.approval.tx);
-        const r = await client.waitForTransactionReceipt({ hash: approvalHash });
+        const sentHash = approvalHash;
+        const r = await client.waitForTransactionReceipt({ hash: sentHash })
+          .catch((e: unknown) => this.wrapReadError(e, `approval receipt (${sentHash} was sent)`, { approvalHash: sentHash }));
         if (r.status !== 'success') throw new BlazeError('reverted', `approval transaction reverted (${approvalHash})`);
       }
       plan = { ...plan, approval: { ...plan.approval, current: plan.approval.amount } };
@@ -717,7 +726,8 @@ export class BlazePhoenix {
     }
     const hash = await send(plan.tx);
     if (!wait) return { plan, ...(approvalHash ? { approvalHash } : {}), hash };
-    const receipt = await client.waitForTransactionReceipt({ hash });
+    const receipt = await client.waitForTransactionReceipt({ hash })
+      .catch((e: unknown) => this.wrapReadError(e, `swap receipt (${hash} was sent)`, { hash, ...(approvalHash ? { approvalHash } : {}) }));
     let amountOut: bigint | undefined;
     if (receipt.status === 'success') {
       const logs = parseEventLogs({ abi: ROUTER_ABI, logs: receipt.logs, eventName: 'Swap' })
@@ -746,6 +756,7 @@ export class BlazePhoenix {
       ]);
       return { chainId, address: t.address, symbol, name, decimals, native: false };
     } catch (e) {
+      if (isTransportError(e)) this.wrapReadError(e, `decimals of ${t.address}`);
       throw new BlazeError('bad_request', `${t.address} does not answer decimals() on ${CHAINS[chainId].name} — not an ERC-20?`, { cause: e });
     }
   }
@@ -785,7 +796,7 @@ export class BlazePhoenix {
     lookbackBlocks?: bigint; chunkBlocks?: bigint;
   }): Promise<Fill[]> {
     const ctx = await this.ctx(opts);
-    const toBlock = opts.toBlock ?? await ctx.client.getBlockNumber();
+    const toBlock = opts.toBlock ?? await ctx.client.getBlockNumber().catch((e: unknown) => this.wrapReadError(e, 'block number'));
     const span = opts.lookbackBlocks ?? BigInt(Math.ceil(3_600 / CHAINS[ctx.chainId].blockTime)); // ~1h
     const fromBlock = opts.fromBlock ?? (toBlock > span ? toBlock - span : 0n);
     if (fromBlock > toBlock) throw new BlazeError('bad_request', 'fromBlock is after toBlock');
@@ -807,7 +818,7 @@ export class BlazePhoenix {
     return ctx.client.watchEvent({
       address: ctx.dep.contracts.router,
       pollingInterval: opts.pollMs ?? 4_000,
-      onError: opts.onError,
+      onError: opts.onError ? (e: Error) => opts.onError!(this.readError(e, 'watchFills')) : undefined,
       onLogs: (logs) => { for (const f of toFills(logs as never)) opts.onFill(f); },
     });
   }

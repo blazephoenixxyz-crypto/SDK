@@ -18,6 +18,17 @@ the live contracts they read today are unchanged.
 - A token's `decimals()` is read on your node for every human `amount` and every `tokenInfo`
   call, and is no longer remembered for the life of the client. A token whose decimals change
   at the same address (a proxy upgrade, or a redeploy) is now sized in its current units.
+- Error contract: these failures are now a `BlazeError` too. An unsupported chain is the
+  new code `bad_chain` (it was a plain `Error`). A failed node read in `execute` (allowance,
+  approval receipt, swap receipt), in `getFills` (head block) and in `tokenInfo` (`decimals()`)
+  is `rpc_error`, and `watchFills` passes a `BlazeError` to `onError`. When `execute` had
+  already sent a transaction, `details.hash` / `details.approvalHash` name it.
+- Revert decoding: `GateE` and `AdapterE` are decoded with the reason from the Dex source
+  (`DecodedError.contract` gains `'Gate'` and `'Adapter'`). `BLAZE_ERRORS_ABI` holds every
+  custom error the Dex sources declare, adapters included, one entry per signature. Only the
+  enumerated protocol errors and `Panic` carry a numeric `code`; any other custom error decodes
+  by name without one, since its first argument is data. `Error(string)` keeps its text,
+  reduced to one printable line of at most 120 characters.
 
 ## 1.2.1 — one meaning per field
 

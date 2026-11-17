@@ -188,14 +188,18 @@ guesses a token from a ticker.
 
 ## Errors
 
-Every failure, `solvency()` included, is a `BlazeError` with a stable `code`; protocol reverts carry `revert`
-(`RouterE` / `QuoterE` / `SolverE` / `HubE` + the reason from the contract's own source):
+Every failure, `solvency()` and `watchFills`' `onError` included, is a `BlazeError` with a stable `code`;
+protocol reverts carry `revert`. The enumerated protocol errors (`RouterE` / `QuoterE` / `SolverE` / `HubE` /
+`GateE` / `AdapterE`) and `Panic` decode to a numeric `revert.code` and the reason from the contract's own
+source; any other custom error the Dex declares decodes by name with no `code` (its arguments are data,
+not codes), and an `Error(string)` keeps its text, cleaned:
 
 | code | meaning |
 |---|---|
 | `rpc_required` | no node configured for that chain |
 | `rpc_chain_mismatch` | the node serves a different chain |
-| `rpc_error` | your node failed (network, rate limit) |
+| `rpc_error` | your node failed (network, rate limit). If `execute` had already sent a transaction, `details.hash` / `details.approvalHash` name it |
+| `bad_chain` | the chain is not one the SDK supports (name or id) |
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
 | `not_executable` | the Quoter's swap math says the route cannot execute now (`canExecute = false`), or, with `simulate: true`, the Router's eth_call from `from` reverts |
 | `calldata_mismatch` | Quoter bytes did not match your request — refused |
