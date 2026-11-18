@@ -226,7 +226,7 @@ export interface SimulationResult {
 }
 
 export interface DecodedError {
-  contract: 'Router' | 'Quoter' | 'Solver' | 'Hub' | 'unknown';
+  contract: 'Router' | 'Quoter' | 'Solver' | 'Hub' | 'Gate' | 'Adapter' | 'unknown';
   name: string;
   code?: number;
   reason: string;

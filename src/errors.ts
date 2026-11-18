@@ -1,7 +1,8 @@
 // =============================================================================
-//  Errors — every failure has a stable machine `code`, and every protocol
-//  revert (RouterE / QuoterE / SolverE / HubE) is decoded into a sentence taken
-//  from the contract's own source comments.
+//  Errors — every failure has a stable machine `code`, and every enumerated
+//  protocol revert (RouterE / QuoterE / SolverE / HubE / GateE / AdapterE) is
+//  decoded into a sentence taken from the contract's own source comments. Any
+//  other custom error the Dex declares decodes by name, without a `code`.
 // =============================================================================
 
 import { decodeErrorResult } from 'viem';
@@ -30,6 +31,7 @@ export type BlazeErrorCode =
   | 'rpc_required'
   | 'rpc_chain_mismatch'
   | 'rpc_error'
+  | 'bad_chain'
   | 'bad_request'
   | 'not_deployed'
   | 'unsupported_by_version'
@@ -88,12 +90,42 @@ const HUB: Record<number, string> = {
   9: 'V4 claim ineligible',
 };
 
+const GATE: Record<number, string> = {
+  1: 'not the curator', 2: 'control renounced or not the admin', 3: 'bad argument',
+  4: 'no live adapter (none, or its code moved from the pin)', 5: 'resolve gave no pool',
+  6: 'adapter code refused by the scan', 7: 'timelock running', 8: 'nothing pending',
+  9: 'adapter code moved since the proposal', 10: 'replacing a family after renounce',
+  11: 're-entered', 12: 'not exact-in', 13: 'paid less than asked',
+  14: 'the adapter kept part of the input or of the output', 15: 'the wrapper was left holding it',
+  16: 'the pair already holds MAX_WRAPPERS_PER_PAIR wrappers',
+};
+const ADAPTER: Record<number, string> = {
+  0: 'zero address at construction', 1: 'the caller is not a wrapper of the Gate',
+  2: 'the venue does not vouch for the pool (registry / factory / vault)', 3: 'the pair is not traded by that pool',
+  4: 'an asset or the form of the pool is refused (asset type, ETH sentinel, metapool, native-enabled tricrypto)',
+  5: 'an allowance survived the venue call (PULL), or allowance() could not be read (a failed read is not a zero)',
+  6: "a venue callback outside the adapter's own call, or not from the venue", 7: "the pool's hooks are refused",
+  8: 'the hint is malformed', 9: 'the amount is outside what the venue takes',
+};
+
 const TABLES: Record<string, { contract: DecodedError['contract']; codes: Record<number, string> }> = {
   RouterE: { contract: 'Router', codes: ROUTER },
   QuoterE: { contract: 'Quoter', codes: QUOTER },
   SolverE: { contract: 'Solver', codes: SOLVER },
   HubE: { contract: 'Hub', codes: HUB },
+  GateE: { contract: 'Gate', codes: GATE },
+  AdapterE: { contract: 'Adapter', codes: ADAPTER },
 };
+
+/** The decoded form of one revert. Only an enumerated protocol error (TABLES) or a Panic has a
+ *  `code`; any other error's first argument is data (a delta, a flag, an amount), never a code.
+ *  `Error(string)` keeps its text, cleaned as untrusted. */
+function describeDecoded(name: string, args: readonly unknown[] | undefined): DecodedError {
+  const a0 = Array.isArray(args) && args.length ? args[0] : undefined;
+  if (name === 'Error') return { contract: 'unknown', name, reason: untrustedText(typeof a0 === 'string' ? a0 : undefined) || name };
+  if (TABLES[name] || name === 'Panic') return describeProtocolError(name, a0 === undefined ? undefined : Number(a0));
+  return describeProtocolError(name);
+}
 
 export function describeProtocolError(name: string, code?: number): DecodedError {
   const t = TABLES[name];
@@ -111,8 +143,7 @@ export function decodeRevertData(data: Hex | undefined): DecodedError | undefine
   if (!data || data === '0x' || data.length < 10) return undefined;
   try {
     const e = decodeErrorResult({ abi: BLAZE_ERRORS_ABI, data });
-    const code = Array.isArray(e.args) && e.args.length ? Number(e.args[0]) : undefined;
-    return describeProtocolError(e.errorName, code);
+    return describeDecoded(e.errorName, e.args as readonly unknown[] | undefined);
   } catch {
     return undefined;
   }
@@ -129,8 +160,7 @@ export function decodeBlazeError(err: unknown): DecodedError | undefined {
     // viem ContractFunctionRevertedError: `data` is the decoded { errorName, args }.
     const d = e.data as { errorName?: string; args?: unknown[] } | Hex | undefined;
     if (d && typeof d === 'object' && typeof d.errorName === 'string') {
-      const code = Array.isArray(d.args) && d.args.length ? Number(d.args[0]) : undefined;
-      return describeProtocolError(d.errorName, code);
+      return describeDecoded(d.errorName, d.args);
     }
     if (typeof d === 'string') {
       const r = decodeRevertData(d as Hex);

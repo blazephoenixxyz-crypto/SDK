@@ -26,8 +26,13 @@ const solc = require('solc');
 
 const srcDir = path.join(dex, 'src');
 const sources = {};
-for (const f of fs.readdirSync(srcDir)) {
-  if (f.endsWith('.sol')) sources[`src/${f}`] = { content: fs.readFileSync(path.join(srcDir, f), 'utf8') };
+// src/ and src/adapters/: the Gate's adapters raise errors a swap can surface too.
+for (const sub of ['', 'adapters']) {
+  const dir = path.join(srcDir, sub);
+  if (!fs.existsSync(dir)) continue;
+  for (const f of fs.readdirSync(dir)) {
+    if (f.endsWith('.sol')) sources[path.posix.join('src', sub, f)] = { content: fs.readFileSync(path.join(dir, f), 'utf8') };
+  }
 }
 const input = {
   language: 'Solidity',
@@ -70,6 +75,21 @@ for (const it of quoter) {
 // no matter which contract in the call stack raised it.
 const errorsOf = (abi) => abi.filter((x) => x.type === 'error');
 const allErrors = [...errorsOf(quoter), ...errorsOf(solver), ...errorsOf(hub), ...errorsOf(router)];
+// BLAZE_ERRORS_ABI is every custom error the Dex sources declare (Gate, wrapper and adapters
+// included), one entry per signature, so a revert from anywhere in the call stack decodes.
+const sig = (e) => `${e.name}(${e.inputs.map((i) => i.type).join(',')})`;
+const everyError = (() => {
+  const seen = new Set(allErrors.map(sig));
+  const out = [...allErrors];
+  for (const file of Object.keys(res.contracts ?? {}).sort()) {
+    for (const name of Object.keys(res.contracts[file]).sort()) {
+      for (const e of errorsOf(strip(res.contracts[file][name].abi ?? []))) {
+        if (!seen.has(sig(e))) { seen.add(sig(e)); out.push(e); }
+      }
+    }
+  }
+  return out;
+})();
 const withErrors = (abi) => {
   const have = new Set(abi.filter((x) => x.type === 'error').map((x) => x.name));
   return [...abi, ...allErrors.filter((e) => !have.has(e.name) && have.add(e.name))];
@@ -105,7 +125,7 @@ const body = [
   emit('SOLVER_ABI', withErrors(callable(solver))),
   emit('QUOTER_ABI', withErrors(callable(quoter))),
   emit('ROUTER_ABI', withErrors(callable(router))),
-  emit('BLAZE_ERRORS_ABI', allErrors),
+  emit('BLAZE_ERRORS_ABI', everyError),
   `export const ABI_SOURCE_REVISION = ${JSON.stringify(dexRev)} as const;\n`,
 ].join('\n');
 fs.writeFileSync(out, body);

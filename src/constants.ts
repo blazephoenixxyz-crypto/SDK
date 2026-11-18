@@ -8,6 +8,8 @@
 //  YOU configure — see rpc.ts. That is the whole point of 1.0.
 // =============================================================================
 
+import { BlazeError } from './errors.js';
+
 export const API_BASE = 'https://blazephoenix.xyz';
 
 /** Where the live, versioned deployment registry is published. Static JSON —
@@ -97,7 +99,7 @@ const ALIASES: Record<string, SupportedChainId> = {
 export function resolveChain(chain: number | string): SupportedChainId {
   const id = ALIASES[String(chain).trim().toLowerCase()];
   if (!id) {
-    throw new Error(
+    throw new BlazeError('bad_chain',
       `Unsupported chain "${chain}" — use 8453/base, 1/eth, 10/optimism, `
       + `42161/arbitrum or 4663/robinhood`,
     );

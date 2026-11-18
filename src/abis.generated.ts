@@ -5680,6 +5680,26 @@ export const BLAZE_ERRORS_ABI = [
     ],
     "name": "RouterE",
     "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "name": "code",
+        "type": "uint8"
+      }
+    ],
+    "name": "GateE",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "name": "code",
+        "type": "uint8"
+      }
+    ],
+    "name": "AdapterE",
+    "type": "error"
   }
 ] as const;
 
