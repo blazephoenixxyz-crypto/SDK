@@ -188,8 +188,11 @@ guesses a token from a ticker.
 
 ## Errors
 
-Every failure, `solvency()` and `watchFills`' `onError` included, is a `BlazeError` with a stable `code`;
-protocol reverts carry `revert`. The enumerated protocol errors (`RouterE` / `QuoterE` / `SolverE` / `HubE` /
+Every failed node read inside a client method, `solvency()` and `watchFills`' `onError` included, is a
+`BlazeError` with a stable `code`; protocol reverts carry `revert`. Outside that guarantee: an error your own
+wallet throws in `execute` (`getChainId`, `sendTransaction`) reaches you as the wallet threw it, and the
+standalone helpers (`toBaseUnits`, `buildApproveTx`, …) can throw a plain `Error` on malformed input.
+The enumerated protocol errors (`RouterE` / `QuoterE` / `SolverE` / `HubE` /
 `GateE` / `AdapterE`) and `Panic` decode to a numeric `revert.code` and the reason from the contract's own
 source; any other custom error the Dex declares decodes by name with no `code` (its arguments are data,
 not codes), and an `Error(string)` keeps its text, cleaned:

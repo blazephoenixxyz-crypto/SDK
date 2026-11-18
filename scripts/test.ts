@@ -1044,17 +1044,24 @@ for (const leak of LEAKS) {
     ['tokenInfo', (b) => b.tokenInfo('base', USDC)],
     ['getFills', (b) => b.getFills({ chain: 'base' })],
   ];
+  const thrown: string[] = [];
   for (const m of methods) {
     for (const [name, call] of calls) {
       const { provider } = mockProvider();
       const blaze = new BlazePhoenix({ rpc: { base: faultyNode(provider, (x) => x === m, LEAKS[0]) }, registry: { mode: 'embedded' }, retries: 0, cacheTtlMs: 0 });
-      try { await call(blaze); passed++; }
+      try { await call(blaze); }
       catch (e) {
+        thrown.push(`${name} ${m}`);
         check(`census: ${name}() with ${m} failing throws only a BlazeError without the key`,
           e instanceof BlazeError && !causeText(e).includes('SECRETKEY'), `${(e as Error)?.name}: ${String((e as Error)?.message).slice(0, 100)}`);
       }
     }
   }
+  // A combination that does not throw never reaches the failing method, so it proves nothing on its own and
+  // counts as nothing; instead the set that does reach a failure is pinned, so a new read is a decision.
+  eq('census: the method x RPC pairs that reach the failing node', thrown, [
+    'getFills eth_blockNumber', 'quote eth_call', 'quoteExact eth_call', 'buildSwap eth_call', 'tokenInfo eth_call', 'getFills eth_getLogs',
+  ]);
 }
 // Static census: every RPC read in src/client.ts sits under a try whose catch wraps it, or carries its own .catch.
 {
@@ -1102,9 +1109,6 @@ for (const leak of LEAKS) {
   }
   eq('a padded alias still resolves (control)', resolveChain(' base '), 8453);
   eq('8453 still resolves (control)', resolveChain(8453), 8453);
-  // One question, one name: the hosted API answers the same request with the literal `bad_chain`.
-  const code: import('../src/errors.js').BlazeErrorCode = 'bad_chain';
-  eq('the code is the API literal', code, 'bad_chain');
 }
 // 4731 — decodeRevertData reports a `code` only for an enumerated protocol error or a Panic.
 {
@@ -1113,10 +1117,15 @@ for (const leak of LEAKS) {
   const DEX_ERRORS = parseAbi(['error RouterE(uint16 code)', 'error AdapterE(uint8 code)', 'error GateE(uint8 code)',
     'error QuoteDeltas(int256 d0, int256 d1)', 'error GateQuoteCall(uint256 out)', 'error InputProbe(bool taxed)']);
   const enc = (errorName: string, args: unknown[]) => (encodeErrorResult as (x: unknown) => Hex)({ abi: DEX_ERRORS, errorName: errorName as never, args: args as never });
+  // One keyword per GateE / AdapterE code, from the reason the Dex source gives it (BlazePhoenixGate.sol,
+  // adapters/ExtAdapterBase.sol). Each is also checked absent from every other code's reason, so a reason
+  // moved to the wrong code, or a dropped one, fails.
+  const GATE_KEY: Record<number, string> = { 1: 'curator', 2: 'renounced or not the admin', 3: 'bad argument', 4: 'no live adapter', 5: 'resolve gave', 6: 'refused by the scan', 7: 'timelock', 8: 'nothing pending', 9: 'moved since the proposal', 10: 'replacing a family', 11: 're-entered', 12: 'exact-in', 13: 'paid less', 14: 'kept part', 15: 'left holding', 16: 'MAX_WRAPPERS_PER_PAIR' };
+  const ADAPTER_KEY: Record<number, string> = { 0: 'zero address', 1: 'not a wrapper', 2: 'vouch', 3: 'not traded', 4: 'asset type', 5: 'allowance survived', 6: 'callback', 7: 'hooks', 8: 'hint', 9: 'outside what the venue takes' };
   const rows: [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }][] = [
     ['RouterE(5) (control)', enc('RouterE', [5]), { name: 'RouterE', code: 5, reasonHas: 'slippage', contract: 'Router' }],
-    ...Array.from({ length: 10 }, (_, k) => [`AdapterE(${k})`, enc('AdapterE', [k]), { name: 'AdapterE', code: k, reasonHas: k === 9 ? 'amount' : '', contract: 'Adapter' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
-    ...Array.from({ length: 16 }, (_, k) => [`GateE(${k + 1})`, enc('GateE', [k + 1]), { name: 'GateE', code: k + 1, reasonHas: k + 1 === 13 ? 'paid less' : '', contract: 'Gate' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
+    ...Array.from({ length: 10 }, (_, k) => [`AdapterE(${k})`, enc('AdapterE', [k]), { name: 'AdapterE', code: k, reasonHas: ADAPTER_KEY[k], contract: 'Adapter' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
+    ...Array.from({ length: 16 }, (_, k) => [`GateE(${k + 1})`, enc('GateE', [k + 1]), { name: 'GateE', code: k + 1, reasonHas: GATE_KEY[k + 1], contract: 'Gate' }] as [string, Hex, { name: string; code?: number; reasonHas: string; contract?: string }]),
     ['QuoteDeltas(-5,3)', enc('QuoteDeltas', [-5n, 3n]), { name: 'QuoteDeltas', reasonHas: 'QuoteDeltas' }],
     ['InputProbe(true)', enc('InputProbe', [true]), { name: 'InputProbe', reasonHas: 'InputProbe' }],
     ['GateQuoteCall(2^256-1)', enc('GateQuoteCall', [2n ** 256n - 1n]), { name: 'GateQuoteCall', reasonHas: 'GateQuoteCall' }],
@@ -1132,7 +1141,7 @@ for (const leak of LEAKS) {
       const d = decodeBlazeError(err);
       check(`decode ${label} (${form}): code ${want.code ?? 'absent'}, reason names it`,
         !!d && d.name === want.name && d.code === want.code && ('code' in d) === (want.code !== undefined)
-        && (want.reasonHas === '' || d.reason.includes(want.reasonHas)) && (want.contract === undefined || d.contract === want.contract)
+        && d.reason.includes(want.reasonHas) && (want.contract === undefined || d.contract === want.contract)
         && /^[\x20-\x7e]*$/.test(d.reason), JSON.stringify(d));
     }
     // viem's decoded form: { errorName, args }.
@@ -1141,6 +1150,14 @@ for (const leak of LEAKS) {
       const d = decodeBlazeError({ data: viemForm });
       check(`decode ${label} (object): code ${want.code ?? 'absent'}`, !!d && d.code === want.code && ('code' in d) === (want.code !== undefined), JSON.stringify(d, (_k, x) => (typeof x === 'bigint' ? `${x}n` : x)));
     }
+  }
+  for (const [family, keys] of [['GateE', GATE_KEY], ['AdapterE', ADAPTER_KEY]] as [string, Record<number, string>][]) {
+    const crossed: string[] = [];
+    for (const k of Object.keys(keys).map(Number)) {
+      const reason = decodeBlazeError({ data: enc(family, [k]) })?.reason ?? '';
+      for (const j of Object.keys(keys).map(Number)) if (j !== k && reason.includes(keys[j])) crossed.push(`${family}(${k}) has "${keys[j]}"`);
+    }
+    eq(`decode ${family}: no code's reason carries another code's keyword`, crossed, []);
   }
   // Parity: every custom error the Dex declares (Gate and adapters included) is in the generated table.
   const names = new Set((BLAZE_ERRORS_ABI as readonly { type: string; name?: string }[]).filter((x) => x.type === 'error').map((x) => x.name));
