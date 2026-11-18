@@ -1065,7 +1065,7 @@ for (const leak of LEAKS) {
 }
 // Static census: every RPC read in src/client.ts sits under a try whose catch wraps it, or carries its own .catch.
 {
-  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'client.ts'), 'utf8');
+  const src = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8');
   const site = /\bclient\.(readContract|getBlockNumber|getLogs|waitForTransactionReceipt|call|getCode|getBalance|estimateGas)\(/g;
   // Helpers whose every caller catches: named here so a new one is a decision, not an accident.
   // decimalsOf: every caller has its own .catch or try; read(() => …): the verification helper turns a failure into a failed check.

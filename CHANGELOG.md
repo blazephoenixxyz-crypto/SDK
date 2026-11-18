@@ -21,8 +21,8 @@ the live contracts they read today are unchanged.
 - Error contract: these failures are now a `BlazeError` too. An unsupported chain is the
   new code `bad_chain` (it was a plain `Error`). A failed node read in `execute` (allowance,
   approval receipt, swap receipt), in `getFills` (head block) and in `tokenInfo` (`decimals()`)
-  is `rpc_error`, and `watchFills` passes a `BlazeError` to `onError`. When `execute` had
-  already sent a transaction, `details.hash` / `details.approvalHash` name it.
+  is `rpc_error`, and `watchFills` passes a `BlazeError` to `onError`. When waiting for the
+  receipt of a transaction `execute` already sent fails, `details.hash` / `details.approvalHash` name it.
 - Revert decoding: `GateE` and `AdapterE` are decoded with the reason from the Dex source
   (`DecodedError.contract` gains `'Gate'` and `'Adapter'`). `BLAZE_ERRORS_ABI` holds every
   custom error the Dex sources declare, adapters included, one entry per signature. Only the

@@ -201,7 +201,7 @@ not codes), and an `Error(string)` keeps its text, cleaned:
 |---|---|
 | `rpc_required` | no node configured for that chain |
 | `rpc_chain_mismatch` | the node serves a different chain |
-| `rpc_error` | your node failed (network, rate limit). If `execute` had already sent a transaction, `details.hash` / `details.approvalHash` name it |
+| `rpc_error` | your node failed (network, rate limit). If waiting for the receipt of a transaction `execute` already sent fails, `details.hash` / `details.approvalHash` name it |
 | `bad_chain` | the chain is not one the SDK supports (name or id) |
 | `no_route` | the Solver found no executable path (`SolverE(5)`) or the quote reverted |
 | `not_executable` | the Quoter's swap math says the route cannot execute now (`canExecute = false`), or, with `simulate: true`, the Router's eth_call from `from` reverts |
