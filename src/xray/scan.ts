@@ -1,7 +1,7 @@
 // Port of deep-xray-tiers@1998a4d core/scan.mjs as generators (sans-IO): every `await send(req)` became
 // `yield* ask(req)`, which yields one exact JSON-RPC request (no id) and normalises the reply through
 // classifyRpcReply. The rung is chosen by a token-independent probe (decision 12); token-call errors never move it.
-import { decodeFunctionResult, keccak256 } from 'viem';
+import { decodeFunctionResult, encodeFunctionResult, keccak256 } from 'viem';
 import { PROBE } from './abi.js';
 import { classifyRpcReply } from './rpc.js';
 import type { Rpc } from './step.js';
@@ -48,8 +48,12 @@ export function* runB(ctx: any): Gen<any> {
   const resp = yield* ask(req);
   const c: any = classifyToken(resp);
   if (c.cls !== 'ok') return { status: 'NOT_MEASURED', code: c.code, why: c.why, resp: J(resp ?? null).slice(0, 300) };
-  try { return { status: 'RAN', result: { tier: 'B', ...(decodeFunctionResult as any)({ abi: PROBE.abi, functionName: 'probe', data: resp.result }) }, X: ctx.X }; }
-  catch { return { status: 'NOT_MEASURED', why: 'undecodable answer' }; }
+  // Canonical only: viem decodes trailing bytes and dirty address words, so the answer must be the re-encoding.
+  try {
+    const d = (decodeFunctionResult as any)({ abi: PROBE.abi, functionName: 'probe', data: resp.result });
+    if ((encodeFunctionResult as any)({ abi: PROBE.abi, functionName: 'probe', result: d }) !== String(resp.result).toLowerCase()) throw new Error('non-canonical');
+    return { status: 'RAN', result: { tier: 'B', ...d }, X: ctx.X };
+  } catch { return { status: 'NOT_MEASURED', why: 'undecodable answer' }; }
 }
 
 /** Tier A with the code-driven retries (tiers.ts:aRetry), each once, labelled in `retries`. */
