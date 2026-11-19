@@ -1000,10 +1000,15 @@ console.log('client · usdValue');
   // one via fails inside the multicall — mutant: aggregate3 with allowFailure=false
   {
     const { blaze } = setup({ usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }), [key(WETH, USDC)]: () => ({ netOut: 2_000_000_000n }) }) });
-    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
-    eq('usdValue: a reverting via is not measured, with its decoded reason; the others stand',
-      [v.usdValue, v.vias[1]!.status, v.vias[1]!.usd, v.vias[1]!.reason?.startsWith('SolverE(5)'), v.spread],
-      [2_000_000n, 'not measured', undefined, true, null]);
+    const name = 'usdValue: a reverting via is not measured, with its decoded reason; the others stand';
+    try {
+      const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+      eq(name,
+        [v.usdValue, v.vias[1]!.status, v.vias[1]!.usd, v.vias[1]!.reason?.startsWith('SolverE(5)'), v.spread],
+        [2_000_000n, 'not measured', undefined, true, null]);
+    } catch (e) {
+      check(name, false, `threw ${(e as BlazeError)?.code ?? ''} ${(e as Error)?.message?.slice(0, 120)}`);
+    }
   }
   // all fail — mutant: no measured via gives usdValue 0n
   {
@@ -1050,9 +1055,13 @@ console.log('client · usdValue');
     eq('usdValue: a 0-hop route and a netOut of 0 are not measured — null, not 0',
       [v.usdValue, v.usd, v.vias[0]!.reason?.includes('0 hops'), v.vias[1]!.reason?.startsWith('netOut is 0')],
       [null, 'not measured', true, true]);
-    const dust = usdFromVias(readings({ vias: [viaX(X(1), 1n, 10n, 1n), viaX(X(2), 1n, 0n, 1n)] }));
-    eq('usdFromVias: a via that scales below one base unit (or from refX 0) is not measured',
-      [dust.usdValue, dust.vias.map((x) => x.reason?.startsWith('below one base unit'))], [null, [true, true]]);
+    const dustName = 'usdFromVias: a via that scales below one base unit (or from refX 0) is not measured';
+    try {
+      const dust = usdFromVias(readings({ vias: [viaX(X(1), 1n, 10n, 1n), viaX(X(2), 1n, 0n, 1n)] }));
+      eq(dustName, [dust.usdValue, dust.vias.map((x) => x.reason?.startsWith('below one base unit'))], [null, [true, true]]);
+    } catch (e) {
+      check(dustName, false, `threw ${(e as Error)?.message?.slice(0, 120)}`);
+    }
   }
   // route-discovered X (2 hops) — mutant: request 2 not pinned to request 1's block
   {
