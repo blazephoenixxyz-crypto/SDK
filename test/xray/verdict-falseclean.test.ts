@@ -14,7 +14,7 @@ const OK = () => ({ ok: true, gas: 40_000n, revertData: '0x' });
  * tax (partial sell, so the round trip is not measured, as in the real probe: sellFracBps 5000), wallet and pool
  * transfers untaxed. MEASURED at any maxTaxBps > 0.
  */
-export const clean = (k = 1n): any => ({
+const clean = (k = 1n): any => ({
   unmeasured: 0n,
   quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 10_000n * k, buyPoolSent: 10_000n * k, buyDelivered: 9_972n * k,
   quoteSell: OK(), sellHops: 1n, sell: OK(), sellIn: 4_986n * k, sellPoolReceived: 4_986n * k, sellOut: 4_900n * k, sellTokenSelfDelta: 0n,
@@ -22,7 +22,7 @@ export const clean = (k = 1n): any => ({
   poolTransfer: OK(), poolTransferSent: 100n * k, poolTransferReceived: 100n * k,
 });
 /** Full sell (S == D): the round trip is measured as 1 - sellOut / buyIn, here exactly lossBps. */
-export const fullSell = (k: bigint, lossBps: bigint): any => {
+const fullSell = (k: bigint, lossBps: bigint): any => {
   const r = clean(k);
   Object.assign(r, { sellIn: r.buyDelivered, sellPoolReceived: r.buyDelivered, sellOut: (10_000n - lossBps) * k });
   return r;
