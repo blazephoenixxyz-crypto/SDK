@@ -5,6 +5,11 @@
 Some of these functions are already prepared for the V2 DEX and the V4 staking engine;
 the live contracts they read today are unchanged.
 
+- `usdValue({ chain, token, amountIn })`: the USD value of an amount, read on the Quoter only
+  (no oracle, no price API) in one `Multicall3.aggregate3` eth_call, two when the direct route
+  touches more tokens, both at the same block. The value is the minimum over the direct quote
+  to the dollar token, the quote via WETH and via each token on the direct route (up to 8 vias);
+  a via that measured nothing is `'not measured'`, never 0. `usdFromVias` is the pure form.
 - `decodeRouterControlLog` reads the Router's rescue and renunciation logs in every
   version's form: `RescueCancelled(token, to)` and `ControlRenounced()` (2.x), and the
   legacy `RescueQueued(token, to, 0)` and `Cfg(0, address(0))`. The live 1.0.0 Routers

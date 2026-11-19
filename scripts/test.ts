@@ -5,10 +5,10 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   decodeErrorResult as viemDecodeError, decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeEventTopics, encodeFunctionResult,
-  getAbiItem, parseAbi, toEventSelector, toFunctionSelector, type AbiFunction,
+  getAbiItem, getAddress, parseAbi, toEventSelector, toFunctionSelector, type AbiFunction,
 } from 'viem';
 import { formatAbiItem } from 'viem/utils';
-import { ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI } from '../src/abis.js';
+import { BLAZE_ERRORS_ABI, ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI } from '../src/abis.js';
 import {
   CHAINS, EXECUTION_PROOF_TOPIC0, FEE_BPS, FEE_TOPIC0, SURPLUS_TOPIC0, SWAP_TOPIC0, resolveChain,
 } from '../src/constants.js';
@@ -22,7 +22,8 @@ import { phoenixCheck } from '../src/checks.js';
 import { BlazeError, decodeBlazeError, decodeRevertData, untrustedText } from '../src/errors.js';
 import { BlazePhoenix, deepLink } from '../src/client.js';
 import { toJSON } from '../src/json.js';
-import type { Address, Hex, Preview, Route } from '../src/types.js';
+import { MULTICALL3, MULTICALL3_ABI, USD_MAX_VIAS, usdFromVias, type UsdReadings } from '../src/usd.js';
+import type { Address, Hex, Hop, Preview, Route } from '../src/types.js';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail?: string) {
@@ -305,12 +306,16 @@ interface MockOpts {
   settlesFor?: Address;                      // the Router's swap settles only for this eth_call `from`; any other caller (or none) gets RouterE(5)
   exactFor?: (amountIn: bigint) => bigint;   // what previewPlanExact answers (default outFor − 5)
   exactPool?: Address;                       // previewPlanExact prices a different pool
+  // previewPlan per pair: the netOut (and optionally the hops) the Quoter answers, or its revert data
+  usd?: (tIn: Address, tOut: Address, amountIn: bigint) => { netOut: bigint; hops?: Hop[] } | { revert: Hex };
+  decimalsFor?: Record<string, number | 'revert'>;   // decimals() per lowercase address
 }
 function mockProvider(o: MockOpts = {}) {
   const calls: { method: string; fn?: string; to?: string; block?: unknown }[] = [];
   const quoter = (o.quoter ?? V1.quoter).toLowerCase();
   const router = (o.router ?? V1.router).toLowerCase();
   const outFor = o.outFor ?? ((a: bigint) => a * 3_000n / 10n ** 12n);
+  let head = 0x100n;                // 'latest' moves one block per Multicall3 call
   const provider = {
     async request({ method, params }: { method: string; params?: unknown }) {
       const p = params as unknown[];
@@ -327,6 +332,28 @@ function mockProvider(o: MockOpts = {}) {
       if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
       const { to, data, from: caller } = p[0] as { to: string; data: Hex; from?: string };
       const t = to.toLowerCase();
+      if (t === MULTICALL3.toLowerCase()) {
+        // Multicall3 as deployed: inner calls run at the same block; a failed call with
+        // allowFailure=false reverts the whole batch.
+        const d = decodeFunctionData({ abi: MULTICALL3_ABI, data });
+        const tag = p[1];
+        calls.push({ method, fn: `multicall.${d.functionName}`, to: t, block: tag });
+        const at = typeof tag === 'string' && tag.startsWith('0x') ? BigInt(tag) : (head += 1n);
+        const blockData = encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', result: at });
+        if (d.functionName === 'getBlockNumber') return blockData;
+        const [c3] = d.args as unknown as [readonly { target: Address; allowFailure: boolean; callData: Hex }[]];
+        const results: { success: boolean; returnData: Hex }[] = [];
+        for (const c of c3) {
+          if (c.target.toLowerCase() === t) { results.push({ success: true, returnData: blockData }); continue; }
+          try {
+            results.push({ success: true, returnData: await provider.request({ method: 'eth_call', params: [{ to: c.target, data: c.callData }, `0x${at.toString(16)}`] }) as Hex });
+          } catch (e) {
+            if (!c.allowFailure) throw Object.assign(new Error('execution reverted: Multicall3: call failed'), { code: 3, data: '0x' });
+            results.push({ success: false, returnData: ((e as { data?: Hex }).data ?? '0x') as Hex });
+          }
+        }
+        return encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'aggregate3', result: results });
+      }
       if (t === quoter) {
         const d = decodeFunctionData({ abi: QUOTER_ABI, data });
         calls.push({ method, fn: d.functionName, to: t, block: p[1] });
@@ -341,6 +368,12 @@ function mockProvider(o: MockOpts = {}) {
           case 'solver': return encodeFunctionResult({ abi: QUOTER_ABI, functionName: 'solver', result: solver });
           case 'previewPlan': case 'previewPlanWithMinOut': {
             const [tIn, tOut, amt, umo] = d.args as unknown as [Address, Address, bigint, bigint?];
+            if (o.usd) {
+              const u = o.usd(tIn, tOut, amt);
+              if ('revert' in u) throw Object.assign(new Error('execution reverted'), { code: 3, data: u.revert });
+              const r = { ...mkRoute(tIn, tOut, amt, u.netOut), ...(u.hops ? { hops: u.hops } : {}) };
+              return encodeFunctionResult({ abi: QUOTER_ABI, functionName: d.functionName, result: [{ ...mkPreview(r, umo ?? 0n), netOut: u.netOut }, r, false] as never });
+            }
             const route = mkRoute(tIn, tOut, amt, outFor(amt));
             return encodeFunctionResult({ abi: QUOTER_ABI, functionName: d.functionName, result: [mkPreview(route, umo ?? 0n), route, false] as never });
           }
@@ -398,7 +431,11 @@ function mockProvider(o: MockOpts = {}) {
       // ERC-20 surface on any other address
       const d = decodeFunctionData({ abi: ERC20_ABI, data });
       calls.push({ method, fn: `erc20.${d.functionName}`, to: t });
-      if (d.functionName === 'decimals') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'decimals', result: o.decimals ?? 18 });
+      if (d.functionName === 'decimals') {
+        const v = o.decimalsFor?.[t];
+        if (v === 'revert') throw Object.assign(new Error('execution reverted'), { code: 3, data: '0x' });
+        return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'decimals', result: v ?? o.decimals ?? 18 });
+      }
       if (d.functionName === 'allowance') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'allowance', result: o.allowance ?? 0n });
       if (d.functionName === 'symbol') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'symbol', result: 'TKN' });
       if (d.functionName === 'name') return encodeFunctionResult({ abi: ERC20_ABI, functionName: 'name', result: 'Token' });
@@ -918,6 +955,188 @@ console.log('client · decimals');
   eq('amount and amountIn are compared at the current decimals', agree, 10n ** 6n);
   await throwsCode('amount = 1 and amountIn = 1e18 disagree once decimals() is 6',
     () => blaze.quote({ chain: 'base', tokenIn: USDC, tokenOut: 'WETH', amount: '1', amountIn: 10n ** 18n }), 'bad_request');
+}
+
+console.log('client · usdValue');
+{
+  // USD value from the Quoter only: one Multicall3.aggregate3 (two when the direct route
+  // discovers more vias), MIN over the measured vias, 'not measured' never 0.
+  const TKN = getAddress('0x00000000000000000000000000000000000000aa');
+  const X = (n: number) => getAddress(`0x00000000000000000000000000000000000000${(0xb0 + n).toString(16)}`);
+  const NO_ROUTE = encodeErrorResult({ abi: BLAZE_ERRORS_ABI, errorName: 'SolverE', args: [5] });
+  const key = (a: string, b: string) => `${a.toLowerCase()}>${b.toLowerCase()}`;
+  type Ans = { netOut: bigint; hops?: Hop[] } | { revert: Hex };
+  const table = (m: Record<string, (amt: bigint) => Ans>) =>
+    (a: Address, b: Address, amt: bigint): Ans => m[key(a, b)]?.(amt) ?? { revert: NO_ROUTE };
+  const hop = (a: Address, b: Address, amt: bigint): Hop => mkRoute(a, b, amt, 1n).hops[0]!;
+  const usdc6 = { [USDC.toLowerCase()]: 6 };
+  const setup = (o: MockOpts) => {
+    const { provider, calls } = mockProvider({ decimalsFor: usdc6, ...o });
+    const blaze = new BlazePhoenix({ rpc: { base: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    return { blaze, calls, agg: () => calls.filter((c) => c.fn === 'multicall.aggregate3'), previews: () => calls.filter((c) => c.fn === 'previewPlan').length };
+  };
+  const readings = (over: Partial<UsdReadings>): UsdReadings => ({
+    chainId: 8453, version: '1.0.0', dollarToken: USDC, dollarDecimals: 6, token: TKN, amountIn: 10n ** 18n,
+    tokenDecimals: 18, blockNumber: 1n, vias: [], rpcRequests: 1, ...over,
+  });
+  const direct = (n: bigint) => ({ path: [TKN, USDC], legs: [{ tokenIn: TKN, tokenOut: USDC, amountIn: 10n ** 18n, netOut: n, hops: 1 }] });
+  const viaX = (x: Address, outX: bigint, refX: bigint, outD: bigint) => ({ path: [TKN, x, USDC], legs: [
+    { tokenIn: TKN, tokenOut: x, amountIn: 10n ** 18n, netOut: outX, hops: 1 },
+    { tokenIn: x, tokenOut: USDC, amountIn: refX, netOut: outD, hops: 1 },
+  ] });
+
+  // agree — mutant: planUsdVias drops the WETH via
+  {
+    const { blaze, agg, previews } = setup({ usd: table({
+      [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }),
+      [key(TKN, WETH)]: () => ({ netOut: 10n ** 15n }),
+      [key(WETH, USDC)]: (a) => ({ netOut: a === 10n ** 18n ? 2_000_000_000n : 0n }),
+    }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue agree: direct and via WETH both measured, one eth_call, one block',
+      [v.usdValue, v.usd, v.vias.map((x) => [x.path.length, x.status, x.usd]), v.spread, v.rpc.requests, agg().length, previews(), v.blockNumber, v.label],
+      [2_000_000n, '2', [[2, 'measured', 2_000_000n], [3, 'measured', 2_000_000n]], { min: 2_000_000n, max: 2_000_000n, diff: 0n, bps: 0 }, 1, 1, 3, 0x101n, 'USD (via USDC)']);
+  }
+  // one via fails inside the multicall — mutant: aggregate3 with allowFailure=false
+  {
+    const { blaze } = setup({ usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }), [key(WETH, USDC)]: () => ({ netOut: 2_000_000_000n }) }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue: a reverting via is not measured, with its decoded reason; the others stand',
+      [v.usdValue, v.vias[1]!.status, v.vias[1]!.usd, v.vias[1]!.reason?.startsWith('SolverE(5)'), v.spread],
+      [2_000_000n, 'not measured', undefined, true, null]);
+  }
+  // all fail — mutant: no measured via gives usdValue 0n
+  {
+    const { blaze } = setup({ usd: table({}) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue: every via fails → null and "not measured", never 0',
+      [v.usdValue, v.usd, v.unitPrice, v.spread, v.vias.map((x) => x.status)],
+      [null, 'not measured', 'not measured', null, ['not measured', 'not measured']]);
+  }
+  // A = 0, A > uint128 (±1 at the edge) — mutant: usdFromVias accepts 0
+  {
+    const { blaze } = setup({ usd: table({ [key(TKN, USDC)]: () => ({ netOut: 1n }) }) });
+    await throwsCode('usdValue: amountIn 0 → bad_request', () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: 0n }), 'bad_request');
+    await throwsCode('usdValue: amountIn 2^128 → bad_request', () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: 1n << 128n }), 'bad_request');
+    eq('usdValue: amountIn 2^128 − 1 is read', (await blaze.usdValue({ chain: 'base', token: TKN, amountIn: (1n << 128n) - 1n })).usdValue, 1n);
+    await throwsCode('usdFromVias: amountIn 0 → bad_request, never a value', () => usdFromVias(readings({ amountIn: 0n, vias: [direct(1n)] })), 'bad_request');
+    await throwsCode('usdFromVias: amountIn 2^128 → bad_request', () => usdFromVias(readings({ amountIn: 1n << 128n, vias: [direct(1n)] })), 'bad_request');
+  }
+  // T = USDC — mutant: the identity branch is skipped
+  {
+    const { blaze, previews } = setup({ usd: table({}) });
+    const v = await blaze.usdValue({ chain: 'base', token: 'USDC', amountIn: 10_000_000n });
+    eq('usdValue: USDC is the dollar token itself — identity, no Quoter call',
+      [v.usdValue, v.usd, v.unitPrice, v.vias, v.spread, v.rpc.requests, previews()],
+      [10_000_000n, '10', '1', [{ path: [USDC], status: 'identity', usd: 10_000_000n, legs: [] }], null, 1, 0]);
+  }
+  // T = WETH / ETH — mutant: the WETH via is added for WETH itself
+  {
+    const { blaze, previews } = setup({ usd: table({ [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }) }) });
+    const w = await blaze.usdValue({ chain: 'base', token: 'WETH', amountIn: 10n ** 18n });
+    const e = await blaze.usdValue({ chain: 'base', token: 'ETH', amountIn: 10n ** 18n });
+    eq('usdValue: WETH and ETH have no via WETH (the direct quote already is WETH → USDC)',
+      [w.vias.map((x) => x.path), e.vias.length, w.usdValue, e.usdValue, w.unitPrice, previews()],
+      [[[WETH, USDC]], 1, 3_000_000_000n, 3_000_000_000n, '3000', 2]);
+  }
+  // empty route / netOut 0 / scaled below 1 unit — mutants: each of the three guards removed
+  {
+    const { blaze } = setup({ usd: table({
+      [key(TKN, USDC)]: () => ({ netOut: 5n, hops: [] }),
+      [key(TKN, WETH)]: () => ({ netOut: 0n }),
+      [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }),
+    }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 1n });
+    eq('usdValue: a 0-hop route and a netOut of 0 are not measured — null, not 0',
+      [v.usdValue, v.usd, v.vias[0]!.reason?.includes('0 hops'), v.vias[1]!.reason?.startsWith('netOut is 0')],
+      [null, 'not measured', true, true]);
+    const dust = usdFromVias(readings({ vias: [viaX(X(1), 1n, 10n, 1n), viaX(X(2), 1n, 0n, 1n)] }));
+    eq('usdFromVias: a via that scales below one base unit (or from refX 0) is not measured',
+      [dust.usdValue, dust.vias.map((x) => x.reason?.startsWith('below one base unit'))], [null, [true, true]]);
+  }
+  // route-discovered X (2 hops) — mutant: request 2 not pinned to request 1's block
+  {
+    const A = 10n ** 18n;
+    const { blaze, agg } = setup({ usd: table({
+      [key(TKN, USDC)]: (a) => ({ netOut: 5_000_000n, hops: [hop(TKN, X(1), a), hop(X(1), USDC, 7n * 10n ** 18n)] }),
+      [key(TKN, WETH)]: () => ({ netOut: 10n ** 15n }),
+      [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }),
+      [key(TKN, X(1))]: () => ({ netOut: 7n * 10n ** 18n }),
+      [key(X(1), USDC)]: (a) => ({ netOut: a === 7n * 10n ** 18n ? 4_000_000n : 0n }),
+    }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A });
+    const blocks = agg().map((c) => c.block);
+    eq('usdValue: a token on the direct route adds a via, read in a second eth_call at the same block',
+      [v.rpc.requests, blocks, v.blockNumber, v.vias.map((x) => [x.path, x.usd, x.scaledFrom]), v.usdValue],
+      [2, ['latest', '0x101'], 0x101n,
+        [[[TKN, USDC], 5_000_000n, undefined], [[TKN, WETH, USDC], 3_000_000n, 10n ** 18n], [[TKN, X(1), USDC], 4_000_000n, 7n * 10n ** 18n]],
+        3_000_000n]);
+  }
+  // vias come from the DIRECT route only — mutant: the first decoded route (here T → WETH) is used
+  {
+    const { blaze, agg } = setup({ usd: table({
+      [key(TKN, WETH)]: (a) => ({ netOut: 10n ** 15n, hops: [hop(TKN, X(1), a), hop(X(1), WETH, 5n)] }),
+      [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }),
+      [key(X(1), USDC)]: () => ({ netOut: 1n }),
+    }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue: with the direct quote reverting, no via is discovered from another leg',
+      [v.rpc.requests, agg().length, v.vias.length, v.usdValue], [1, 1, 2, 3_000_000n]);
+  }
+  // cap 8 vias; route order; T, USDC, WETH and repeats skipped — mutants: `>=` → `>`, no dedup
+  {
+    const toks = [TKN, WETH, X(1), X(2), X(1), X(3), X(4), X(5), X(6), X(7), X(8), USDC];
+    const hops = toks.slice(0, -1).map((a, i) => hop(a, toks[i + 1]!, 100n + BigInt(i)));
+    const { blaze } = setup({ usd: (a, b) => (key(a, b) === key(TKN, USDC) ? { netOut: 9n, hops } : { netOut: 10n ** 18n }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq(`usdValue: at most ${USD_MAX_VIAS} vias, route order, T/USDC/WETH/repeats skipped, refX = the route's amount of X`,
+      v.vias.map((x) => [x.path[1], x.scaledFrom]),
+      [[USDC, undefined], [WETH, 10n ** 18n], [X(1), 102n], [X(2), 103n], [X(3), 105n], [X(4), 106n], [X(5), 107n], [X(6), 108n]]);
+  }
+  // min, not max — mutant: the reducer keeps the larger
+  eq('usdFromVias: the value is the MINIMUM over the measured vias',
+    usdFromVias(readings({ vias: [direct(4n), viaX(WETH, 2n, 1n, 1n), direct(9n)] })).usdValue, 2n);
+  // spread — mutants: bps over min instead of max; spread with one measured via
+  {
+    const s = usdFromVias(readings({ vias: [direct(3_000_000n), direct(7_000_000n)] })).spread;
+    eq('usdFromVias: spread bps = floor((max − min)·10000 / max)', s, { min: 3_000_000n, max: 7_000_000n, diff: 4_000_000n, bps: 5714 });
+    eq('usdFromVias: no spread with a single measured via', usdFromVias(readings({ vias: [direct(3n), { ...direct(0n) }] })).spread, null);
+  }
+  // parity vector (the hosted decoder tests the same case) — mutants: usd / unitPrice scale
+  {
+    const want = ['3', '1.5', 3_000_000n, { min: 3_000_000n, max: 5_000_000n, diff: 2_000_000n, bps: 4000 }];
+    const p = usdFromVias(readings({ amountIn: 2n * 10n ** 18n, vias: [direct(5_000_000n), viaX(WETH, 10n ** 15n, 10n ** 18n, 3_000_000_000n)] }));
+    eq('usdFromVias parity vector: 2e18 → "3" USD, unit 1.5, spread 4000 bps', [p.usd, p.unitPrice, p.usdValue, p.spread], want);
+    const { blaze } = setup({ usd: table({
+      [key(TKN, USDC)]: () => ({ netOut: 5_000_000n }),
+      [key(TKN, WETH)]: () => ({ netOut: 10n ** 15n }),
+      [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }),
+    }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: '2000000000000000000' });
+    eq('usdValue parity vector on the client: same numbers', [v.usd, v.unitPrice, v.usdValue, v.spread], want);
+  }
+  // decimals() of the token fails — mutant: a failed decimals() read as 18
+  {
+    const { blaze } = setup({ decimalsFor: { ...usdc6, [TKN.toLowerCase()]: 'revert' }, usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }) }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue: token decimals() fails → unitPrice not measured, the value stands',
+      [v.tokenDecimals, v.unitPrice, v.usdValue, v.usd], [null, 'not measured', 2_000_000n, '2']);
+  }
+  // decimals() of the dollar token fails — mutant: the throw removed
+  {
+    const { blaze } = setup({ decimalsFor: { [USDC.toLowerCase()]: 'revert' }, usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }) }) });
+    await throwsCode('usdValue: dollar-token decimals() fails → rpc_error', () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n }), 'rpc_error');
+  }
+  // pinned block — mutant: request 1 ignores req.blockNumber
+  {
+    const { blaze, agg } = setup({ usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }) }) });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n, blockNumber: 0x500n });
+    eq('usdValue: blockNumber pins the read', [agg().map((c) => c.block), v.blockNumber], [['0x500'], 0x500n]);
+  }
+  // label per chain — mutant: label always USDC
+  eq('usdFromVias: the label names the dollar token (USDG on Robinhood Chain)',
+    [usdFromVias(readings({ chainId: 4663, vias: [direct(1n)] })).label, usdFromVias(readings({ vias: [direct(1n)] })).label],
+    ['USD (via USDG)', 'USD (via USDC)']);
 }
 
 // ── ERC-20 helpers ───────────────────────────────────────────────────────────

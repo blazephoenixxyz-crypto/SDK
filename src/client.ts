@@ -15,7 +15,7 @@
 // =============================================================================
 
 import {
-  decodeFunctionResult, getAddress, parseEventLogs, type PublicClient, type WalletClient,
+  decodeFunctionResult, encodeFunctionData, getAddress, parseEventLogs, type PublicClient, type WalletClient,
 } from 'viem';
 import {
   ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI, STAKING_SOLVENCY_ABI,
@@ -29,13 +29,17 @@ import {
   CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
 } from './constants.js';
 import { featuresOf, isZero, type VersionFeatures, type VersionSelector } from './deployments.js';
-import { BlazeError, decodeBlazeError, isTransportError, untrustedText } from './errors.js';
+import { BlazeError, decodeBlazeError, decodeRevertData, isTransportError, untrustedText } from './errors.js';
 import { MAX_UINT256, buildApproveTx, toBaseUnits } from './erc20.js';
 import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
 } from './registry.js';
 import { memGet, memPut, singleflight } from './resilience.js';
 import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions, scrubUrls } from './rpc.js';
+import {
+  MULTICALL3, MULTICALL3_ABI, planUsdVias, usdFromVias,
+  type UsdLegReading, type UsdValue, type UsdValueRequest, type UsdViaReading,
+} from './usd.js';
 import type {
   Address, ApprovalStep, ExactQuote, Fill, Hex, Preview, Quote, QuoteRequest, Route,
   SimulationResult, SolvencyReport, SwapPlan, SwapRequest, TokenInfo, TxRequest,
@@ -235,7 +239,7 @@ export class BlazePhoenix {
 
   // ── tokens & amounts ───────────────────────────────────────────────────────
 
-  private resolveToken(chainId: SupportedChainId, ref: string, side: 'tokenIn' | 'tokenOut'): ResolvedToken {
+  private resolveToken(chainId: SupportedChainId, ref: string, side: 'tokenIn' | 'tokenOut' | 'token'): ResolvedToken {
     const s = (ref ?? '').trim();
     if (HEX_ADDR.test(s)) {
       const a = getAddress(s);
@@ -391,6 +395,87 @@ export class BlazePhoenix {
     });
     if (cacheable) memPut(key, q);
     return q;
+  }
+
+  /** One Multicall3.aggregate3 eth_call (every inner call allowFailure). */
+  private async aggregate3(ctx: Ctx, calls: { target: Address; callData: Hex }[], blockNumber?: bigint) {
+    try {
+      const data = encodeFunctionData({
+        abi: MULTICALL3_ABI, functionName: 'aggregate3', args: [calls.map((c) => ({ ...c, allowFailure: true }))],
+      });
+      const r = await ctx.client.call({ to: MULTICALL3, data, ...(blockNumber !== undefined ? { blockNumber } : {}) });
+      return decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'aggregate3', data: r.data ?? '0x' });
+    } catch (e) {
+      this.wrapReadError(e, 'usdValue');
+    }
+  }
+
+  /** USD value of `amountIn` of `token`, measured on the Quoter only (no oracle, no API):
+   *  the minimum over the direct quote to the dollar token, the quote via WETH and via each
+   *  token the direct route touches. The dollar token (USDC, USDG on Robinhood Chain) is taken
+   *  as 1 USD. One eth_call (Multicall3), two when the direct route discovers more vias; both
+   *  in the same block. A via that measured nothing is 'not measured', never 0. */
+  async usdValue(req: UsdValueRequest): Promise<UsdValue> {
+    const ctx = await this.ctx(req);
+    const t = this.resolveToken(ctx.chainId, req.token, 'token');
+    const amountIn = await this.amountOf(ctx.client, ctx.chainId, { tokenIn: req.token, tokenOut: req.token, amountIn: req.amountIn }, t);
+    const { usdc: dollar, weth } = CHAINS[ctx.chainId];
+    const token = t.address;
+    const identity = token.toLowerCase() === dollar.toLowerCase();
+    const enc = {
+      block: { target: MULTICALL3, callData: encodeFunctionData({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber' }) },
+      decimals: (a: Address) => ({ target: a, callData: encodeFunctionData({ abi: ERC20_ABI, functionName: 'decimals' }) }),
+      preview: (l: UsdLegReading) => ({
+        target: ctx.dep.contracts.quoter,
+        callData: encodeFunctionData({ abi: QUOTER_ABI, functionName: 'previewPlan', args: [l.tokenIn, l.tokenOut, l.amountIn] }),
+      }),
+    };
+    type R = { success: boolean; returnData: Hex };
+    const blockOf = (r: R) => {
+      if (!r.success) throw new BlazeError('rpc_error', 'usdValue: Multicall3.getBlockNumber failed');
+      return decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', data: r.returnData });
+    };
+    const decimalsOf = (r: R): number | null => {
+      if (!r.success) return null;
+      try { return Number(decodeFunctionResult({ abi: ERC20_ABI, functionName: 'decimals', data: r.returnData })); } catch { return null; }
+    };
+    const leg = (l: UsdLegReading, r: R): { reading: UsdLegReading; route?: Route } => {
+      if (!r.success) {
+        const d = decodeRevertData(r.returnData);
+        return { reading: { ...l, error: d ? `${d.name}(${d.code ?? ''}) — ${d.reason}` : 'the Quoter reverted' } };
+      }
+      try {
+        const [pv] = decodeFunctionResult({ abi: QUOTER_ABI, functionName: 'previewPlan', data: r.returnData }) as unknown as [Preview, Route, boolean];
+        return { reading: { ...l, netOut: pv.netOut, hops: pv.route.hops.length }, route: pv.route };
+      } catch {
+        return { reading: { ...l, error: 'the Quoter answer did not decode' } };
+      }
+    };
+    const read = async (vias: UsdViaReading[], at?: bigint) => {
+      const legs = identity ? [] : vias.flatMap((v) => v.legs);
+      const res = await this.aggregate3(ctx, [enc.block, enc.decimals(token), enc.decimals(dollar), ...legs.map(enc.preview)], at);
+      let i = 3;
+      let route: Route | undefined; // the direct quote's route: the first leg read
+      const out = vias.map((v) => ({
+        path: v.path,
+        legs: v.legs.map((l) => { const x = leg(l, res[i]!); if (i++ === 3) route = x.route; return x.reading; }),
+      }));
+      const dollarDecimals = decimalsOf(res[2]!);
+      if (dollarDecimals === null) throw new BlazeError('rpc_error', `usdValue: decimals() of the dollar token ${dollar} failed on your RPC`);
+      return { blockNumber: blockOf(res[0]!), tokenDecimals: decimalsOf(res[1]!), dollarDecimals, vias: out, route };
+    };
+    const first = planUsdVias(token, amountIn, dollar, weth);
+    let got = await read(identity ? [] : first, req.blockNumber);
+    let requests = 1;
+    const all = got.route ? planUsdVias(token, amountIn, dollar, weth, got.route) : first;
+    if (!identity && all.length > first.length) {
+      got = await read(all, got.blockNumber);
+      requests = 2;
+    }
+    return usdFromVias({
+      chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, dollarDecimals: got.dollarDecimals,
+      token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, vias: got.vias, rpcRequests: requests,
+    });
   }
 
   /** Execution-grade re-quote (previewPlanExact): every concentrated leg is

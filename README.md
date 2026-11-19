@@ -180,11 +180,36 @@ toJSON(quote);                         // bigint → string, for HTTP / queues /
 Pure helpers (no RPC): `buildApproveTx`, `buildWrapTx`, `buildUnwrapTx`, `permit2TypedData`,
 `encodeSwapExactInWithPermit2`, `encodeSwapExactIn`, `encodeSwapExactInNative`, `encodeSwapBestExactIn`,
 `decodeSwapExactIn`, `verifySwapExactIn`, `tightenMinOut`, `minOutFor`, `phoenixCheck`,
-`decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`.
+`decodeBlazeError`, `toBaseUnits`, `fromBaseUnits`, `deepLink`, `usdFromVias`.
 
 Tokens: `0x` addresses, or the universal symbols `ETH` (native), `WETH`, `USDC` (the chain's
 dollar asset — USDG on Robinhood), `BZPX`. Anything else: pass the address. The SDK never
 guesses a token from a ticker.
+
+## USD value
+
+```ts
+const v = await blaze.usdValue({ chain: 'base', token: '0x…', amountIn: 10n ** 18n });
+// v.label 'USD (via USDC)', v.usdValue (dollar-token base units), v.usd, v.unitPrice, v.vias, v.spread,
+// v.blockNumber, v.rpc.requests (1 or 2)
+```
+
+The USD value of an amount, read on the Quoter only: no oracle, no price API. The dollar token
+(`USDC`; `USDG` on Robinhood Chain) is taken as 1 USD, hence the label `USD (via USDC)`.
+
+- **The amount matters.** Each number is the `netOut` the Quoter answers for that amount, after
+  the 0.28% fee and including price impact, so 10 tokens and 10,000 tokens can price differently.
+- **Vias.** The direct quote to the dollar token; via WETH (token → WETH for the amount, then 1 WETH
+  → dollar token, scaled); and via each token the direct route touches (token → X for the amount,
+  then the route's own amount of X, `refX`, → dollar token, scaled), up to 8 vias. A scaled leg
+  carries the impact at `refX`, not at the amount the first leg delivered; `scaledFrom` shows `refX`.
+- **The value is the minimum** over the vias that measured something. `spread` (min, max, diff,
+  bps) shows how far they are apart; there is no threshold and no verdict.
+- **"not measured", never 0.** A via whose call reverts, whose route has 0 hops or whose `netOut` is 0
+  measured nothing. If no via measured, `usdValue` is `null` and `usd` is `'not measured'`.
+- **1 or 2 RPC requests.** One `Multicall3.aggregate3` eth_call reads the block number, the
+  decimals and every quote; a second one, pinned to the same block, runs only when the direct
+  route touches more tokens. `usdFromVias` is the same computation without RPC.
 
 ## Errors
 
