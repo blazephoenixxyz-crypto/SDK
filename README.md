@@ -34,7 +34,7 @@ Each item links to the place where it can be checked. The full list is at [https
 - **Source available:** the contract source is public under the [Business Source License 1.1](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex/blob/main/LICENSE), converting to GPL-2.0-or-later on 2030-06-01.
 - **Public CI:** [GitHub Actions](https://github.com/blazephoenixxyz-crypto/Blaze-Phoenix-Dex/actions) on every push, including the Certora Prover and Halmos.
 - **Bug bounty:** a [public programme](https://blazephoenix.xyz/bounty) with [credited researchers](https://blazephoenix.xyz/security/researchers) and [published advisories](https://blazephoenix.xyz/security/advisories).
-- **Whitepaper DOI:** [10.5281/zenodo.23084091](https://doi.org/10.5281/zenodo.23084091); papers timestamped with [OpenTimestamps](https://blazephoenix.xyz/provenance/provenance.json).
+- **Whitepaper DOI:** [10.5281/zenodo.24372939](https://doi.org/10.5281/zenodo.24372939) (v2.3.1; v2.3 at [10.5281/zenodo.23084091](https://doi.org/10.5281/zenodo.23084091)); research papers DOI [10.5281/zenodo.24372935](https://doi.org/10.5281/zenodo.24372935); papers timestamped with [OpenTimestamps](https://blazephoenix.xyz/provenance/provenance.json).
 - **Contact:** contact@blazephoenix.xyz ([security.txt](https://blazephoenix.xyz/.well-known/security.txt)); official channels at [/official](https://blazephoenix.xyz/official).
 - **Audit status:** an independent external audit is scheduled before launch.
 
