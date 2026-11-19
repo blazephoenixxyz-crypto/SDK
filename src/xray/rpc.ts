@@ -12,7 +12,8 @@ export type RpcClass =
 
 const UNAVAILABLE = { cls: 'unavailable', why: 'provider unavailable' } as const;
 export const METHOD_NOT_FOUND = -32601;
-const RATE_LIMITED = new Set([429, -32005]);
+// 12 = dRPC "Can't route your request" (R-rpc.md:51,81): a routing limit, provider unavailable, never a missing tier.
+const RATE_LIMITED = new Set([429, -32005, 12]);
 
 function envelope(x: unknown, strict: boolean): RpcClass {
   if (x === null || typeof x !== 'object') return { ...UNAVAILABLE };

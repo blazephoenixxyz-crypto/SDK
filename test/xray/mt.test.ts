@@ -27,10 +27,10 @@ test('[MT2] probe: 429 / -32005 / http / transport / non-JSON -> provider unavai
     assert.equal(c.cls, 'unavailable', t + JSON.stringify(r)); assert.equal(c.why, 'provider unavailable');
   }
 });
-test('[MT11] probe: a non-revert error steps down (12 routing, -32601, -32602, -32000)', () => {
-  const real = [E(12, "Can't route your request to suitable provider"), E(-32601, 'the method eth_simulateV1 does not exist/is not available'), E(-32602, 'invalid argument'), E(-32000, 'BLOBBASEFEE is not supported on Arbitrum')];
+test('[MT11] probe: a non-revert error steps down (-32601, -32602, -32000); 12 routing is provider unavailable (R-rpc.md:51,81)', () => {
+  const real = [E(-32601, 'the method eth_simulateV1 does not exist/is not available'), E(-32602, 'invalid argument'), E(-32000, 'BLOBBASEFEE is not supported on Arbitrum')];
   for (const t of ['A', 'B', 'C']) for (const r of real) assert.equal((classifyProbe(t, r) as any).cls, 'down', t + r.error.code);
-  assert.equal((classifyProbe('A', real[0]) as any).code, 12);
+  for (const t of ['A', 'B', 'C']) assert.deepEqual(classifyProbe(t, E(12, "Can't route your request to suitable provider")), { cls: 'unavailable', why: 'provider unavailable' }, t);
 });
 test('probe: an executed revert is NOT_MEASURED "probe reverted" (decision 1); ok answers run; wrong shape steps down', () => {
   assert.equal((classifyProbe('A', { result: [{ calls: [{ status: '0x0', returnData: '0x' }] }] }) as any).cls, 'reverted');
@@ -88,9 +88,10 @@ test('scan happy path: rung A:d4, probe ok, buy, sell and later sell ran', async
   assert.equal(r.tier, 'A'); assert.deepEqual(r.probes.map((p: any) => p.rung + ':' + p.cls), ['A:d4:ok']);
   assert.equal(r.result.buy.ok, true); assert.equal(r.result.sell.ok, true); assert.equal(r.result.sellLater?.ok, true);
 });
-test('[MT11] code 12 on the d4 probe (blockOverrides form, R-rpc.tsv:50) -> A:d2, the sub-rung without them', async () => {
-  const { r } = await run({ probe: { 'A:d4': E(12, "Can't route your request to suitable provider") } });
-  assert.equal(r.rung, 'A:d2'); assert.equal(r.status, 'RAN');
+test('[MT11] code 12 on the d4 probe (R-rpc.tsv:50) -> NOT_MEASURED provider unavailable, no step-down to A:d2', async () => {
+  const { r, node } = await run({ probe: { 'A:d4': E(12, "Can't route your request to suitable provider") } });
+  assert.equal(r.status, 'NOT_MEASURED'); assert.equal(r.why, 'provider unavailable'); assert.equal(r.tier, null);
+  assert.deepEqual(r.probes.map((p: any) => p.rung), ['A:d4']); assert.equal(node.reqs.length, 1);
 });
 test('-32601 on both A probes (simulateV1 absent, R-rpc.tsv:72) -> B measures', async () => {
   const no = E(-32601, 'the method eth_simulateV1 does not exist/is not available');

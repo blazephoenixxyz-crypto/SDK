@@ -71,7 +71,7 @@ export function selectTier(answers: any) {
 export function classifyToken(resp: any) {
   const k = classifyRpcReply(resp);
   if (k.cls === 'result' && k.result !== null) return { cls: 'ok' };
-  if (k.cls === 'unavailable') return { cls: 'not-measured', code: resp?.httpStatus ?? null, why: resp?.httpStatus ? 'http ' + resp.httpStatus : 'transport' };
+  if (k.cls === 'unavailable') return { cls: 'not-measured', code: resp?.httpStatus ?? null, why: 'provider unavailable' + (resp?.httpStatus ? ' (http ' + resp.httpStatus + ')' : '') };
   const e: any = k.cls === 'error' ? k : {};
   return { cls: 'not-measured', code: e.code ?? null, why: `error ${e.code ?? '?'}: ${String(e.message ?? '').toLowerCase().slice(0, 80)}` };
 }

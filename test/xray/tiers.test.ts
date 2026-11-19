@@ -33,7 +33,8 @@ test('classifyProbe: -32601 (also as HTTP 400 body) steps down; 429/5xx/transpor
 
 test('classifyToken: an HTTP 400 JSON-RPC error body keeps its JSON-RPC code; HTTP 503 is not measured by status', () => {
   assert.deepEqual([classifyToken(rpcErr(-32000, 'Out Of Gas', 400)).cls, (classifyToken(rpcErr(-32000, 'Out Of Gas', 400)) as any).code], ['not-measured', -32000]);
-  assert.equal((classifyToken({ httpStatus: 503 }) as any).why, 'http 503');
+  assert.equal((classifyToken({ httpStatus: 503 }) as any).why, 'provider unavailable (http 503)');
+  assert.equal((classifyToken({ httpStatus: 503 }) as any).code, 503);
   assert.equal(classifyToken({ result: '0x00' }).cls, 'ok');
 });
 
