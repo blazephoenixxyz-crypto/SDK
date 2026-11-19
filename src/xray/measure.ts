@@ -3,8 +3,8 @@
 // ("not measured"), never 0. Taxes round UP (cautious); the round-trip loss rounds UP too.
 // Divergences from measure.mjs (V-X1): an absent `unmeasured` field is not 0; `sellOut` is reported and a
 // sale that delivers 0 wei condemns; the swap-side sell tax counts in the verdict; a wallet transfer that
-// was not measured is NOT_MEASURED. roundTripLossBps stays out of the verdict: it includes pool fees and
-// price impact, so it is not a tax.
+// was not measured is NOT_MEASURED. roundTripLossBps is not a tax (it includes pool fees and price impact):
+// it never condemns, but at or above the threshold it caps the verdict at WARN.
 import type { Status, Verdict } from './lattice.js';
 
 export const PROTOCOL_FEE_BPS_V1 = 28n; // Router 1.0.0 PROTOCOL_FEE_BPS (router-BlazePhoenixRouter.sol:90)
@@ -146,7 +146,12 @@ export function instrumentVerdict(m: Measure, { maxTaxBps }: { maxTaxBps: number
   if (m.sellOk !== true) return nm('sell not measured');
   if (m.transferOk === false) return { v: 'WARN', status: 'WARN', why: 'wallet transfer reverted' };
   if (m.transferOk !== true) return nm('wallet transfer not measured');
-  if (m.buyTaxBps === null || m.sellTaxBps === null) return nm('a tax was not measured');
+  if (m.buyTaxBps === null || m.sellTaxBps === null || m.sellTaxSwapBps === null) return nm('a tax was not measured');
+  // The round trip includes pool fees and price impact, so it does not condemn alone; at or above the
+  // threshold it is never MEASURED (lesson (a), V-X1 C2-f).
+  if (m.roundTripLossBps !== null && m.roundTripLossBps >= BigInt(maxTaxBps)) {
+    return { v: 'WARN', status: 'WARN', why: `roundTripLossBps ${m.roundTripLossBps} >= ${maxTaxBps}` };
+  }
   return { v: 'MEASURED', status: 'MEASURED', why: 'buy, sell and transfers measured' };
 }
 
