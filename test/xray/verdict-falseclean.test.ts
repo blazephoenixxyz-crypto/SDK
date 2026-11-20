@@ -14,7 +14,22 @@ const OK = () => ({ ok: true, gas: 40_000n, revertData: '0x' });
  * tax (partial sell, so the round trip is not measured, as in the real probe: sellFracBps 5000), wallet and pool
  * transfers untaxed. MEASURED at any maxTaxBps > 0.
  */
-const clean = (k = 1n): any => ({
+/** Quoter netOut after the protocol fee, the fee rounded up (BlazePhoenixQuoter.sol:353): what the Router delivers. */
+const afterFee = (gross: bigint) => gross - (gross * 28n + 9_999n) / 10_000n;
+/** A pool price as [wei out, tokens in], set by the scenario: the clean vector sells 4986 tokens for 4900 wei. */
+type Rate = readonly [bigint, bigint];
+const SELL: Rate = [4_900n, 4_986n];
+/**
+ * The V5 quantities at tier A/C (no tier given): every quote with safetyBuffer 0; the token's own balance and the pair's
+ * anchor balance read and still across the transfer to the pair; buyQuotedNet is the pool output after the 28 bps fee;
+ * sellQuotedNet is sellIn at the pool price the scenario declares, never read from sellOut.
+ */
+const quoted = (r: any, [w, t]: Rate = SELL): any => Object.assign(r, {
+  buyQuotedNet: afterFee(r.buyPoolSent), buySafetyBuffer: 0n, sellSafetyBuffer: 0n,
+  sellQuotedNet: (r.sellIn * w) / t,
+  poolTransferTokenSelfDelta: 0n, poolTransferPairAnchorDelta: 0n,
+});
+const clean = (k = 1n): any => quoted({
   unmeasured: 0n,
   quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 10_000n * k, buyPoolSent: 10_000n * k, buyDelivered: 9_972n * k,
   quoteSell: OK(), sellHops: 1n, sell: OK(), sellIn: 4_986n * k, sellPoolReceived: 4_986n * k, sellOut: 4_900n * k, sellTokenSelfDelta: 0n,
@@ -25,7 +40,8 @@ const clean = (k = 1n): any => ({
 const fullSell = (k: bigint, lossBps: bigint): any => {
   const r = clean(k);
   Object.assign(r, { sellIn: r.buyDelivered, sellPoolReceived: r.buyDelivered, sellOut: (10_000n - lossBps) * k });
-  return r;
+  // ETH-only loss: the pool's own price pays (10000 - lossBps) * k for the 9972 * k sold, and the quote prices that too.
+  return quoted(r, [10_000n - lossBps, 9_972n]);
 };
 const SCALES = [1n, 10n ** 14n, 10n ** 18n];
 const V = (r: any, maxTaxBps = 100) => instrumentVerdict(measure(r), { maxTaxBps });
@@ -33,7 +49,7 @@ const V = (r: any, maxTaxBps = 100) => instrumentVerdict(measure(r), { maxTaxBps
 for (const k of SCALES) {
   test(`[fixture] clean vector at scale ${k} is MEASURED with every tax exactly 0`, () => {
     const m = measure(clean(k));
-    for (const f of ['buyTaxBps', 'sellTaxBps', 'sellTaxSwapBps', 'transferTaxBps'] as const) assert.equal(m[f], 0n, f);
+    for (const f of ['buyTaxBps', 'sellTaxBps', 'sellTaxSwapBps', 'transferTaxBps', 'buyEconBps', 'sellEconBps', 'quoteBufferBps'] as const) assert.equal(m[f], 0n, f);
     assert.equal(m.roundTripLossBps, null);
     assert.deepEqual(V(clean(k)), { v: 'MEASURED', status: 'MEASURED', why: 'buy, sell and transfers measured' });
   });
@@ -43,14 +59,16 @@ for (const k of SCALES) {
 // 9900; transfer to the pool 100/100 -> sellTaxBps 0; maxTaxBps 100. The prototype said MEASURED. [M2]
 test('(i) C2-f exact vector: sellTaxSwapBps 9900 with a clean pool transfer CONDEMNs at maxTaxBps 100', () => {
   const r = clean();
-  Object.assign(r, { sellIn: 500n, sellPoolReceived: 5n, sellOut: 1n, poolTransferSent: 100n, poolTransferReceived: 100n });
+  // The pool paid 1 wei for the 5 tokens it got: that price quotes the 500 sold at 100 wei (economic tax 9900, not above).
+  quoted(Object.assign(r, { sellIn: 500n, sellPoolReceived: 5n, sellOut: 1n, poolTransferSent: 100n, poolTransferReceived: 100n }), [1n, 5n]);
+  assert.equal(r.sellQuotedNet, 100n);
   const m = measure(r);
   assert.equal(m.sellTaxBps, 0n); assert.equal(m.sellTaxSwapBps, 9_900n); assert.equal(m.buyTaxBps, 0n); assert.equal(m.sellOut, 1n);
   const v = instrumentVerdict(m, { maxTaxBps: 100 });
   assert.equal(v.v, 'CONDEMN'); assert.equal(v.why, 'sellTaxSwapBps 9900 >= 100');
 });
 test('(i) C2-f with a full sell (ETH-only loss 9999 bps): CONDEMN by the swap-side tax', () => {
-  const r = fullSell(1n, 9_999n); r.sellPoolReceived = 99n;
+  const r = fullSell(1n, 9_999n); r.sellPoolReceived = 99n; quoted(r, [1n, 99n]); assert.equal(r.sellQuotedNet, 100n);
   const m = measure(r);
   assert.equal(m.roundTripLossBps, null); assert.equal(m.sellTaxSwapBps, 9_901n); assert.equal(m.sellTaxBps, 0n);
   assert.equal(instrumentVerdict(m, { maxTaxBps: 100 }).v, 'CONDEMN');

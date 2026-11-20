@@ -8,10 +8,16 @@ import { combine } from '../../src/xray/lattice.js';
 import { buildReport } from '../../src/xray/report.js';
 
 const OK = () => ({ ok: true, gas: 40_000n, revertData: '0x' });
-/** Clean Result at scale k (buy tax 0, partial sell of 10000k out of 19944k delivered, untaxed transfers). */
+/** Quoter netOut after the protocol fee, the fee rounded up (BlazePhoenixQuoter.sol:353): what the Router delivers. */
+const afterFee = (gross: bigint) => gross - (gross * 28n + 9_999n) / 10_000n;
+/**
+ * Clean Result at scale k (buy tax 0, partial sell of 10000k out of 19944k delivered, untaxed transfers). V5 at tier
+ * A/C: every quote with safetyBuffer 0, the buy quote net of the 28 bps fee, the token's own balance and the pair's
+ * anchor balance still across the transfer to the pair.
+ */
 const clean = (k = 1n): any => ({
-  unmeasured: 0n,
-  quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 20_000n * k, buyPoolSent: 20_000n * k, buyDelivered: 19_944n * k, buyQuotedNet: 20_000n * k,
+  unmeasured: 0n, buySafetyBuffer: 0n, sellSafetyBuffer: 0n, poolTransferTokenSelfDelta: 0n, poolTransferPairAnchorDelta: 0n,
+  quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 20_000n * k, buyPoolSent: 20_000n * k, buyDelivered: 19_944n * k, buyQuotedNet: afterFee(20_000n * k),
   quoteSell: OK(), sellHops: 1n, sell: OK(), sellIn: 10_000n * k, sellPoolReceived: 10_000n * k, sellOut: 9_900n * k, sellQuotedNet: 9_900n * k,
   sellTokenSelfDelta: 0n, transfer: OK(), transferSent: 100n * k, transferReceived: 100n * k,
   poolTransfer: OK(), poolTransferSent: 100n * k, poolTransferReceived: 100n * k,

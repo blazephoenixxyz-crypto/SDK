@@ -25,6 +25,41 @@ const INTENTIONAL_MEASURE: Record<string, Record<string, unknown>> = {
   'synth-v4-sell-unmeasured.json': { notes: [], poolTransferOk: true },
   'v2-halfsell-direct-56632746.json': { notes: [] },
 };
+// V5 (2026-11-20): the expected Measure is regenerated, the inputs are not. The probe ABI is frozen and carries no
+// quote safetyBuffer, no pt:s/pt:o reads and no pool reserves, so no vector can gain them without inventing data:
+// quoteBufferBps stays null and the transfer to the pair is not identifiable at A/C (sellTaxBps null). The verdicts
+// are unchanged (the loop below still compares them to the JS producer). The V5 fields are computed here from the
+// vector, never copied from the port's output:
+// - buy (Router 1.0.0, BlazePhoenixRouter.sol:410-422, fee rounded down): net = P - floor(P * 28 / 1e4); D > net is an
+//   over-credit (tax null). The two on-chain vectors hit net to the wei, so the producer's buyTaxBps 0 must stand.
+// - econ: ceil((quotedNet - got) * 1e4 / quotedNet); got > quotedNet in wei is null + overCredit.
+// - taxFloorBps: the largest token-side reading the JS producer made (sellTaxSwapBps, sellTaxBps).
+const NOTE_BUF = 'a quote safety buffer is not 0 or not read: the economic tax is not identifiable';
+const NOTE_PT = 'transfer to the pair: token contract balance not measured: swap-side tax not identifiable';
+const NOTE_OC_BUY = 'buy: buyer credited more than the pool sent net of the fee: tax not identifiable';
+const V5_NONE = { buyEconBps: null, sellEconBps: null, sellLaterEconBps: null, quoteBufferBps: null, hiddenTax: false, overCredit: false, pairTransferCovered: true, taxFloorBps: null };
+const ceil = (n: bigint, d: bigint) => (n + d - 1n) / d;
+function v5(f: string, gm: Record<string, any>, r: Record<string, any>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...V5_NONE };
+  const pre: string[] = [], post: string[] = [];
+  const econ = (got: bigint, k: string): string | null => {
+    const q = BigInt(r[k]);
+    if (got > q) { out.overCredit = true; post.push(`${k}: received more than quoted: economic tax not identifiable`); return null; }
+    return String(ceil((q - got) * 10_000n, q));
+  };
+  if (gm.buyOk === true && gm.buyTaxBps !== null) {
+    const D = BigInt(r.buyDelivered), P = BigInt(r.buyPoolSent), net = P - (P * 28n) / 10_000n;
+    if (D > net) { out.overCredit = true; out.buyTaxBps = null; out.buyTaxGrossBps = null; pre.push(NOTE_OC_BUY); }
+    else out.buyEconBps = econ(D, 'buyQuotedNet');
+  }
+  if (gm.sellTaxBps !== null) { out.sellTaxBps = null; post.unshift(NOTE_PT); }
+  if (gm.sellOk === true) out.sellEconBps = econ(BigInt(r.sellOut), 'sellQuotedNet');
+  const reads = [gm.sellTaxSwapBps, gm.sellTaxBps].filter((x) => x !== null).map((x) => BigInt(x));
+  if (reads.length) out.taxFloorBps = String(reads.reduce((m, x) => (x > m ? x : m)));
+  if (gm.buyOk === true) post.push(NOTE_BUF);
+  out.notes = [...pre, ...((INTENTIONAL_MEASURE[f]?.notes as string[] | undefined) ?? gm.notes), ...post];
+  return out;
+}
 
 test('probe ABI is frozen: selector and full fragment hash', () => {
   assert.equal(toFunctionSelector(fn), '0x61153369');
@@ -40,7 +75,7 @@ for (const f of goldens) {
     assert.equal(encodeFunctionResult({ abi: PROBE_ABI as any, functionName: 'probe', result: r }), g.returnData);
     const m = S(measure(r));
     for (const k of NEW_FIELDS) delete m[k];
-    assert.deepEqual(m, { ...g.measure, ...INTENTIONAL_MEASURE[f] });
+    assert.deepEqual(m, { ...g.measure, ...INTENTIONAL_MEASURE[f], ...v5(f, g.measure, S(r)) });
     for (const [t, v] of Object.entries(g.verdict)) {
       const want = (INTENTIONAL[f]?.[t] ?? v) as string;
       assert.equal(instrumentVerdict(measure(r), { maxTaxBps: Number(t) }).v, want, `t=${t}`);
@@ -52,7 +87,13 @@ const base = () => {
   const g = load(goldens.find((f) => f.startsWith('synth-fot5-fullsell'))!);
   const r = decodeFunctionResult({ abi: PROBE_ABI as any, functionName: 'probe', data: g.returnData }) as any;
   r.sellPoolReceived = (BigInt(r.sellIn) * 9_500n) / 10_000n; // a 5 % swap-side tax, below 1000 bps
-  return r;
+  // V5 at A/C, derived from the vector: quotes with safetyBuffer 0, the buy delivered and quoted net of the 28 bps fee
+  // rounded down (Router 1.0.0 BlazePhoenixRouter.sol:410-422, Quoter 1.0.0 BlazePhoenixQuoter.sol:163-165; the synth
+  // vector was credited above that, an over-credit), the sale quoted at the concave bound out * sellIn / poolReceived (economic tax
+  // <= swap-side tax), and the token's own balance and the pair's anchor balance still across the transfer to the pair.
+  const P = BigInt(r.buyPoolSent);
+  return Object.assign(r, { buyDelivered: P - (P * 28n) / 10_000n, buyQuotedNet: P - (P * 28n) / 10_000n, buySafetyBuffer: 0n, sellSafetyBuffer: 0n,
+    sellQuotedNet: (BigInt(r.sellOut) * BigInt(r.sellIn)) / r.sellPoolReceived, poolTransferTokenSelfDelta: 0n, poolTransferPairAnchorDelta: 0n });
 };
 test('baseline (fot5 full sell, 5 % swap-side tax) is MEASURED at 1000 bps (fixture sanity)', () => {
   assert.equal(instrumentVerdict(measure(base()), { maxTaxBps: 1000 }).v, 'MEASURED');

@@ -10,8 +10,26 @@ import { TIER_UNCOVERED, TIER_LIMITS, toResult } from '../../src/xray/tiers.js';
 import { xrayStart, XrayError } from '../../src/xray/index.js';
 
 const OK = () => ({ ok: true, gas: 40_000n, revertData: '0x' });
+/** Quoter netOut after the protocol fee, the fee rounded up (BlazePhoenixQuoter.sol:353): what the Router delivers. */
+const afterFee = (gross: bigint) => gross - (gross * 28n + 9_999n) / 10_000n;
+/** A pool price as [wei out, tokens in]: the quote for S tokens is S * wei / tokens, set by the scenario, never by the output. */
+type Rate = readonly [bigint, bigint];
+const price = (s: bigint, [w, t]: Rate) => (s * w) / t;
+/** The clean vector's untaxed prices: 4986 tokens sold for 4990 wei, the later sale 4786 for 4700. */
+const SELL: Rate = [4_990n, 4_986n], LATER: Rate = [4_700n, 4_786n];
+/**
+ * The V5 quantities at tier A/C: every quote with safetyBuffer 0, buyQuotedNet the pool output after the 28 bps fee,
+ * each sale quoted at the pool price the scenario declares (never read from sellOut / sellLaterOut), and the token's own
+ * balance and the pair's anchor balance still across the transfer to the pair.
+ */
+const quoted = (r: any, sell: Rate = SELL, later: Rate = LATER): any => {
+  Object.assign(r, { buyQuotedNet: afterFee(r.buyPoolSent), buySafetyBuffer: 0n, sellSafetyBuffer: 0n,
+    sellQuotedNet: price(r.sellIn, sell), poolTransferTokenSelfDelta: 0n, poolTransferPairAnchorDelta: 0n });
+  if (r.sellLaterOut !== undefined) Object.assign(r, { sellLaterSafetyBuffer: 0n, sellLaterQuotedNet: price(r.sellLaterIn, later) });
+  return r;
+};
 /** Clean Result: buy 10000 -> 9972 delivered, half sold (4986 -> 4990 wei out), untaxed transfers. */
-const clean = (k = 1n): any => ({
+const clean = (k = 1n): any => quoted({
   unmeasured: 0n,
   quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 10_000n * k, buyPoolSent: 10_000n * k, buyDelivered: 9_972n * k,
   quoteSell: OK(), sellHops: 1n, sell: OK(), sellIn: 4_986n * k, sellPoolReceived: 4_986n * k, sellOut: 4_990n * k, sellTokenSelfDelta: 0n,
@@ -19,7 +37,7 @@ const clean = (k = 1n): any => ({
   poolTransfer: OK(), poolTransferSent: 100n * k, poolTransferReceived: 100n * k,
 });
 /** Tier A adds the later sale of the remainder at B+N. */
-const cleanA = (k = 1n): any => ({ ...clean(k), tier: 'A', quoteLater: { ok: true }, sellLater: OK(),
+const cleanA = (k = 1n): any => quoted({ ...clean(k), tier: 'A', quoteLater: { ok: true }, sellLater: OK(),
   sellLaterIn: 4_786n * k, sellLaterPoolReceived: 4_786n * k, sellLaterOut: 4_700n * k, sellLaterTokenSelfDelta: 0n });
 const CTX = { X: '0x' + '11'.repeat(20), N: 100, fee: { gasPrice: 1n } };
 const rep = (result: any, tier = 'A', maxTaxBps: any = 100) => buildReport({ chainId: 8453, block: { number: 1, hash: '0x' + 'aa'.repeat(32), timestamp: 1n },
@@ -55,7 +73,9 @@ test('[V2] tier A: later sale reverted CONDEMNs', () => {
   assert.equal(rep(r, 'A').verdict, 'CONDEMN');
 });
 test('[V2] tier A: later sale with the pool receiving 50 of 4986 CONDEMNs on the later swap-side tax', () => {
-  const r = cleanA(); Object.assign(r, { sellLaterIn: 4_986n, sellLaterOut: 1n, sellLaterPoolReceived: 50n });
+  // The pool paid 1 wei for the 50 tokens it got: that price quotes the 4986 sold at 99 wei (economic tax 9899 <= 9900).
+  const r = quoted(Object.assign(cleanA(), { sellLaterIn: 4_986n, sellLaterOut: 1n, sellLaterPoolReceived: 50n }), SELL, [1n, 50n]);
+  assert.equal(r.sellLaterQuotedNet, 99n);
   assert.equal(measure(r).sellLaterTaxSwapBps, 9_900n);
   assert.equal(V(r).v, 'CONDEMN');
 });
@@ -88,6 +108,10 @@ test('[V2] toResult: an unreadable pool balance around the later sale leaves the
 test('[V3] swapback (sellTokenSelfDelta < 0) leaves the swap-side sell tax unmeasured', () => {
   const r = clean(); Object.assign(r, { sellPoolReceived: 5_493n, sellTokenSelfDelta: -507n, sellOut: 2_450n });
   assert.equal(measure(r).sellTaxSwapBps, null);
+  // V5: the same-state quote for the 4986 sold (4990) is still read; the seller got 2450, an anchor-side loss of
+  // ceil(2540 * 10000 / 4990) = 5091 bps, which CONDEMNs (more conservative than the token-side NOT_MEASURED).
+  assert.deepEqual(V(r), { v: 'CONDEMN', status: 'CONDEMN', why: 'sellEconBps 5091 >= 100' });
+  delete r.sellQuotedNet;
   assert.equal(V(r).status, 'NOT_MEASURED');
 });
 test('[V3b] token self balance unmeasured (UM.SELF) or absent leaves the swap-side sell tax unmeasured', () => {
@@ -144,7 +168,8 @@ test('[V8] no round-trip guard: roundTripLossBps is null at every scale and an E
   const r = clean();
   assert.equal(measure(r).roundTripLossBps, null);
   assert.equal(V(r).status, 'MEASURED');
-  r.sellOut = 1n; // loss in WETH only, token deltas clean: not a tax reading
+  // Loss in WETH only: the pool's price is 1 wei for the 4986 sold, and the same-state quote prices that too. Token deltas clean: not a tax reading.
+  r.sellOut = 1n; quoted(r, [1n, 4_986n]); assert.equal(r.sellQuotedNet, 1n);
   assert.equal(measure(r).roundTripLossBps, null);
   assert.equal(V(r).status, 'MEASURED');
   for (const k of [1n, 10n ** 6n, 10n ** 18n]) assert.equal(measure(clean(k)).roundTripLossBps, null, `k=${k}`);

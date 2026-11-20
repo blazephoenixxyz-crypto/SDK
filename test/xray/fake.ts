@@ -19,8 +19,24 @@ export const RATE = 1000n;
 export const LATEST = 56632665;
 /** Pool reserves of token and WETH: a swap moves tokens OUT of the pool, so the pool delta is measurable (W2-core-6). */
 export const RESERVE = 10n ** 30n;
-const BPS = 10_000n, FEE = 28n; // Router 1.0.0 PROTOCOL_FEE_BPS, taken on the buy output (measure.ts: D = (1 - t) * P * (1 - fee))
+const BPS = 10_000n, FEE = 28n; // Router 1.0.0 PROTOCOL_FEE_BPS, taken on the swap output (measure.ts: D = (1 - t) * P * (1 - fee))
+/** What the deployed Router 1.0.0 delivers from `x` received on a swap quoted at `gross` (Sourcify exact match, Base
+ *  0x2a779f9Be49aac57495A8B6467Cc325a8a47Eb9f, BlazePhoenixRouter.sol:410-422): fee = floor(min(x, gross) * 28 / 1e4), the
+ *  part above the quoted gross is fee-exempt surplus. */
+const routerNet = (x: bigint, gross: bigint) => x - ((x < gross ? x : gross) * FEE) / BPS;
 const taxed = (o: FakeOpts, v: bigint) => v - (v * (o.taxBps ?? 0n)) / BPS;
+/** What the deployed Quoter 1.0.0 publishes for a gross output (Sourcify exact match, Base
+ *  0x4cEF0615614B212895F45Aa1D4833B16666E18d3, BlazePhoenixQuoter.sol:163-165, :184-185): the protocol fee rounded DOWN
+ *  comes off first, then the safety buffer (sBps of the after-fee amount, rounded down). bp-dex HEAD rounds both up; the
+ *  probe runs against the deployed contracts, so the fake follows them. */
+function quoterNet(gross: bigint, sBps: bigint) {
+  const afterFee = gross - (gross * FEE) / BPS, safetyBuffer = (afterFee * sBps) / BPS;
+  return { afterFee, safetyBuffer, netOut: afterFee > safetyBuffer ? afterFee - safetyBuffer : 0n };
+}
+/** Constant-product pair with a 30 bps fee (uniswap-v2 getAmountOut). */
+const amountOut = (i: bigint, rIn: bigint, rOut: bigint) => (i * 997n * rOut) / (rIn * 1000n + i * 997n);
+/** Curve-mode pair reserves (token, WETH): 1 WETH against 1000 tokens, so a 1e15 wei buy moves the price (~0.1 %). */
+export const CURVE_RT = 10n ** 21n, CURVE_RW = 10n ** 18n;
 const lc = (a: unknown) => String(a).toLowerCase();
 const hex = (n: bigint | number) => '0x' + BigInt(n).toString(16);
 const ERR = (s: string) => encodeErrorResult({ abi: [{ type: 'error', name: 'Error', inputs: [{ name: 'm', type: 'string' }] }], errorName: 'Error', args: [s] });
@@ -35,13 +51,16 @@ function zero(p: any): any {
   return 0n;
 }
 const QO: any = (QUOTER_ABI as any)[0].outputs;
-function preview(tIn: string, tOut: string, amt: bigint, can: boolean) {
+function preview(tIn: string, tOut: string, amt: bigint, can: boolean, q?: { gross: bigint; safetyBuffer: bigint; netOut: bigint }) {
   const pv = zero(QO[0]);
   const legT = QO[0].components.find((c: any) => c.name === 'route').components.find((c: any) => c.name === 'hops').components.find((c: any) => c.name === 'legs');
   const leg = { ...zero({ ...legT, type: 'tuple' }), pool: POOL, kind: 2, amountIn: amt };
-  const out = lc(tIn) === lc(TOKEN) ? amt / RATE : amt * RATE;
+  // Proportional mode: a buy is quoted net of the protocol fee its execution charges (exec, swapExactIn); a sale is
+  // executed without the fee, so it is quoted without it. Curve mode passes the Quoter's own figures (quoterNet).
+  const out = q ? q.gross : lc(tIn) === lc(TOKEN) ? amt / RATE : amt * RATE;
   pv.route.hops = can ? [{ tokenIn: tIn, tokenOut: tOut, amountIn: amt, expectedOut: out, legs: [leg] }] : [];
-  pv.canExecute = can; pv.netOut = out;
+  pv.canExecute = can; pv.netOut = q ? q.netOut : lc(tIn) === lc(TOKEN) ? out : quoterNet(out, 0n).netOut;
+  if (q) { pv.safetyBuffer = q.safetyBuffer; pv.protocolFee = out - quoterNet(out, 0n).afterFee; }
   return encodeFunctionResult({ abi: QUOTER_ABI as any, functionName: 'previewPlan', result: [pv, zero(QO[1]), false] } as any);
 }
 export type FakeOpts = {
@@ -52,10 +71,22 @@ export type FakeOpts = {
   /** V4-verif: sell-only tax (transfers TO the pool) paid to `holder` (default TOKEN itself); before crediting, when the
    *  holder holds >= cap it sells `cap` into the same pool (swapback, uniswap-v2 template). `start` seeds the holder. */
   swapback?: { taxBps: bigint; cap: bigint; start: bigint; holder?: string };
+  /** Curve mode (step plans, tiers A and C): an x*y=k pair with a 30 bps pair fee whose reserves follow every swap in
+   *  the request; quotes as the Quoter (protocol fee 28 bps, then `safetyBps` of buffer, default 0); the Router takes
+   *  the fee on the swap output (buy and sell, as the live 1.0.0 goldens show). A plain transfer to the pair moves its
+   *  balance only (no sync). A sale follows Router 1.0.0 _execV2Amt (BlazePhoenixRouter.sol:546-583): when the pair
+   *  received exactly the amount sent it is priced on that amount (any excess already in the pair stays out of the
+   *  output); when it received less (fee-on-transfer) it is priced on balance - reserve, which sweeps in the excess.
+   *  Every swap then syncs the reserves to the balances (uniswap-v2 _update). Not combined with swapback;
+   *  the tier B probe answer stays proportional. */
+  curve?: { rt?: bigint; rw?: bigint; safetyBps?: bigint };
 };
 function exec(st: any, o: FakeOpts, weth: string, actor: string, to: string, data: string, value: bigint) {
-  const sb = o.swapback, H = sb ? (sb.holder ?? TOKEN) : '';
-  const bal = (t: string, a: string): bigint => st[lc(t)]?.[lc(a)] ?? (lc(a) === lc(POOL) ? RESERVE : sb && lc(t) === lc(TOKEN) && lc(a) === lc(H) ? sb.start : 0n);
+  const sb = o.swapback, H = sb ? (sb.holder ?? TOKEN) : '', cv = o.curve;
+  const pool0 = (t: string) => (cv ? (lc(t) === lc(TOKEN) ? cv.rt ?? CURVE_RT : cv.rw ?? CURVE_RW) : RESERVE);
+  const bal = (t: string, a: string): bigint => st[lc(t)]?.[lc(a)] ?? (lc(a) === lc(POOL) ? pool0(t) : sb && lc(t) === lc(TOKEN) && lc(a) === lc(H) ? sb.start : 0n);
+  // Curve-mode reserves (token, WETH), updated by swaps only.
+  const res = cv ? (st.__res ??= { t: pool0(TOKEN), w: pool0(weth) }) : null;
   // swapback + sell tax on a move of v tokens from `from` to the pool; returns what the pool is credited for the mover.
   const toPool = (from: string, v: bigint): bigint => {
     const tax = (v * sb!.taxBps) / BPS;
@@ -73,17 +104,34 @@ function exec(st: any, o: FakeOpts, weth: string, actor: string, to: string, dat
     case 'deposit': add(to, actor, value); return ok();
     case 'approve': return ok(T(true));
     case 'balanceOf': return ok(T(bal(to, f.args[0])));
-    case 'previewPlan': return ok(preview(f.args[0], f.args[1], f.args[2], !(o.noRoute || (o.noSellRoute && lc(f.args[0]) === lc(TOKEN)))));
+    case 'previewPlan': {
+      const can = !(o.noRoute || (o.noSellRoute && lc(f.args[0]) === lc(TOKEN)));
+      if (!res) return ok(preview(f.args[0], f.args[1], f.args[2], can));
+      const gross = lc(f.args[0]) === lc(TOKEN) ? amountOut(f.args[2], res.t, res.w) : amountOut(f.args[2], res.w, res.t);
+      return ok(preview(f.args[0], f.args[1], f.args[2], can, { gross, ...quoterNet(gross, cv!.safetyBps ?? 0n) }));
+    }
     case 'transfer': if (bal(to, actor) < f.args[1]) return rev(ERR('balance'));
       if (sb && lc(to) === lc(TOKEN) && lc(f.args[0]) === lc(POOL)) { toPool(actor, f.args[1]); return ok(T(true)); } add(to, actor, -f.args[1]); add(to, f.args[0], lc(to) === lc(TOKEN) ? taxed(o, f.args[1]) : f.args[1]); return ok(T(true));
     case 'swapExactIn': {
       const [route, amt, , rcpt] = f.args;
       if (lc(route.hops[0].tokenIn) === lc(weth)) {
         if (o.buyRevert) return rev(BPC_TRANSFER);
-        const net = (taxed(o, amt * RATE) * (BPS - FEE)) / BPS;
+        if (res) {
+          const out = amountOut(amt, res.w, res.t), net = routerNet(taxed(o, out), out);
+          add(weth, actor, -amt); add(weth, POOL, amt); add(TOKEN, POOL, -out); add(TOKEN, rcpt, net);
+          res.t = bal(TOKEN, POOL); res.w = bal(weth, POOL); return ok(T(net));
+        }
+        const net = routerNet(taxed(o, amt * RATE), amt * RATE);
         add(weth, actor, -amt); add(weth, POOL, amt); add(TOKEN, POOL, -amt * RATE); add(TOKEN, rcpt, net); return ok(T(net));
       }
       if (o.sellRevert) return rev(BPC_TRANSFER);
+      if (res) {
+        const got = taxed(o, amt);
+        add(TOKEN, actor, -amt); add(TOKEN, POOL, got);
+        const realIn = got === amt ? amt : bal(TOKEN, POOL) - res.t, out = amountOut(realIn, res.t, res.w);
+        const net = routerNet(out, amountOut(amt, res.t, res.w));
+        add(weth, POOL, -out); add(weth, rcpt, net); res.t = bal(TOKEN, POOL); res.w = bal(weth, POOL); return ok(T(net));
+      }
       if (sb) { const g = toPool(actor, amt), w = g / RATE; add(weth, POOL, -w); add(weth, rcpt, w); return ok(T(w)); }
       const got = taxed(o, amt), wout = got / RATE;
       add(TOKEN, actor, -amt); add(TOKEN, POOL, got); add(weth, POOL, -wout); add(weth, rcpt, wout); return ok(T(wout));
@@ -161,8 +209,8 @@ export function fakeNode(o: FakeOpts = {}) {
       // The probe's own deltas, in the same model as exec() (pool pays out, router fee on the buy output, token tax).
       const a: any = (decodeFunctionData({ abi: PROBE.abi as any, data: p.data }).args as any)[0];
       if (!o.noRoute) {
-        const P = a.buyIn * RATE, D = (taxed(o, P) * (BPS - FEE)) / BPS;
-        Object.assign(out, { buyIn: a.buyIn, buyQuotedNet: P, buyDelivered: D, buyPoolSent: P });
+        const P = a.buyIn * RATE, D = routerNet(taxed(o, P), P);
+        Object.assign(out, { buyIn: a.buyIn, buyQuotedNet: quoterNet(P, 0n).netOut, buyDelivered: D, buyPoolSent: P });
         const S = (D * a.sellFracBps) / BPS, left = D - S, tA = (left * a.transferFracBps) / BPS, pA = (left * a.poolFracBps) / BPS;
         Object.assign(out, { transferSent: tA, transferReceived: taxed(o, tA), poolTransferTo: POOL, poolTransferSent: pA, poolTransferReceived: taxed(o, pA) });
         out.poolTransfer.ok = pA > 0n; out.poolTransfer.gas = 40000n;

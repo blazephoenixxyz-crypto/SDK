@@ -156,9 +156,14 @@ export function planSteps(ctx: any, known: any, tier: any) {
   }
   if (known.pAmt > 0n && known.poolTransferTo) {
     const P = known.poolTransferTo;
-    st.push({ id: 'pt:x0', blk: 4, to: ctx.token, data: bal(ctx.token, X), kind: 'read' }, { id: 'pt:y0', blk: 4, to: ctx.token, data: bal(ctx.token, P), kind: 'read' });
+    // The token's own balance and the pair's anchor balance around the plain transfer (F3): either moving means a
+    // tax to itself or a swap in the same transfer, and the pair delta is then not the transfer's tax.
+    const W = known.poolTransferAnchor;
+    const side = (i: number) => [{ id: `pt:s${i}`, blk: 4, to: ctx.token, data: bal(ctx.token, ctx.token), kind: 'read' },
+      ...(W ? [{ id: `pt:o${i}`, blk: 4, to: W, data: bal(W, P), kind: 'read' }] : [])];
+    st.push({ id: 'pt:x0', blk: 4, to: ctx.token, data: bal(ctx.token, X), kind: 'read' }, { id: 'pt:y0', blk: 4, to: ctx.token, data: bal(ctx.token, P), kind: 'read' }, ...side(0));
     st.push({ id: 'poolTransfer', blk: 4, to: ctx.token, data: transfer(P, known.pAmt), kind: 'bool' });
-    st.push({ id: 'pt:x1', blk: 4, to: ctx.token, data: bal(ctx.token, X), kind: 'read' }, { id: 'pt:y1', blk: 4, to: ctx.token, data: bal(ctx.token, P), kind: 'read' });
+    st.push({ id: 'pt:x1', blk: 4, to: ctx.token, data: bal(ctx.token, X), kind: 'read' }, { id: 'pt:y1', blk: 4, to: ctx.token, data: bal(ctx.token, P), kind: 'read' }, ...side(1));
   }
   st.push({ id: 'rem', blk: 4, to: ctx.token, data: bal(ctx.token, X), kind: 'read' });
   if (tier !== 'A' || known.rem === undefined || known.rem === 0n) return st;
@@ -310,6 +315,7 @@ export function advance(ctx: any, known: any, m: any, tier: any) {
     k.routeSell = pv.route;
     const first = pv.route.hops[0].legs.find((l: any) => Number(l.kind) !== KIND_V4);
     k.poolTransferTo = first ? first.pool : null;
+    k.poolTransferAnchor = first ? pv.route.hops[0].tokenOut : null;
     return { known: k, done: false };
   }
   if (k.left === undefined) {
@@ -348,7 +354,8 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
     poolTransferSent: 0n, poolTransferReceived: 0n };
   r.approveIn.ok = boolOk(m.approveIn);
   const qb = quoteOf(m.quoteBuy); r.quoteBuy.ok = !!(qb && qb.canExecute);
-  if (qb) { r.buyQuotedNet = qb.netOut; r.buyHops = BigInt(qb.route.hops.length); }
+  // safetyBuffer: the quote's deliberate under-statement (Quoter 1.0.0 :175-185); read so that A/C can require 0 (F1).
+  if (qb) { r.buyQuotedNet = qb.netOut; r.buySafetyBuffer = qb.safetyBuffer; r.buyHops = BigInt(qb.route.hops.length); }
   const pv4 = (route: any, i: any) => route && hopPools(route.hops[i < 0 ? route.hops.length - 1 : i].legs).v4;
   if (m.buy) {
     const a = snapVals(m, 'buyA'), b = snapVals(m, 'buyB');
@@ -361,7 +368,7 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
   }
   if (m.approveOut) r.approveOut.ok = boolOk(m.approveOut);
   const qs = quoteOf(m.quoteSell); if (m.quoteSell) r.quoteSell.ok = !!(qs && qs.canExecute);
-  if (qs) { r.sellQuotedNet = qs.netOut; r.sellHops = BigInt(qs.route.hops.length); }
+  if (qs) { r.sellQuotedNet = qs.netOut; r.sellSafetyBuffer = qs.safetyBuffer; r.sellHops = BigInt(qs.route.hops.length); }
   if (m.sell) {
     const a = snapVals(m, 'sellA'), b = snapVals(m, 'sellB');
     if (a.x === null || b.x === null) r.unmeasured |= UM.BAL_X;
@@ -383,6 +390,12 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
       r[name + 'Sent'] = x0 > x1 ? x0 - x1 : 0n; r[name + 'Received'] = y1 > y0 ? y1 - y0 : 0n;
     }
   }
+  if (m.poolTransfer) {
+    // Unread stays absent (not measured), never 0 (F3).
+    const s0 = u256(m['pt:s0']), s1 = u256(m['pt:s1']), o0 = u256(m['pt:o0']), o1 = u256(m['pt:o1']);
+    if (s0 !== null && s1 !== null) r.poolTransferTokenSelfDelta = s1 - s0;
+    if (o0 !== null && o1 !== null) r.poolTransferPairAnchorDelta = o1 - o0;
+  }
   if (tier === 'A' && m.sellLater) {
     r.sellLater = step(m.sellLater);
     const a = snapVals(m, 'lateA'), b = snapVals(m, 'lateB');
@@ -394,13 +407,23 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
       if (a.s !== null && b.s !== null) r.sellLaterTokenSelfDelta = b.s - a.s;
     }
   }
-  if (tier === 'A' && m.quoteLater) { const ql = quoteOf(m.quoteLater); r.quoteLater = { ok: !!(ql && ql.canExecute) }; }
+  if (tier === 'A' && m.quoteLater) {
+    const ql = quoteOf(m.quoteLater); r.quoteLater = { ok: !!(ql && ql.canExecute) };
+    if (ql) { r.sellLaterQuotedNet = ql.netOut; r.sellLaterSafetyBuffer = ql.safetyBuffer; }
+  }
   return r;
 }
 
 /** What a tier cannot measure, by construction (reported next to every result). */
 export const TIER_LIMITS = {
-  A: ['Nitro chains: block.number seen by contracts is the L1 number; a later-sell gap in L2 blocks does not move it'],
-  B: ['tx.origin has code (the injected probe)', 'no later sell (one block)', 'block number/time = pinned block B, not B+1'],
-  C: ['tx.origin = the funding address (has code if it is WETH)', 'msg.sender and recipient = Multicall3 (has code)', 'no later sell (one block)', 'no per-step gas (aggregate3Value returns none)', 'block number/time = pinned block B'],
+  A: ['Nitro chains: block.number seen by contracts is the L1 number; a later-sell gap in L2 blocks does not move it',
+    'transfer to the pair: a fee paid to another wallet that donates tokens back into the pair in the same transfer (no swap) offsets the pair balance; no balance read separates it, so that fee is understated',
+    'later sell of a fee-on-transfer token: the Router prices it on pair balance minus reserve, so it also takes what the transfer to the pair left in the pair; the seller gets more than the quote and the later sell is NOT_MEASURED (over-credit); that excess is not modelled',
+    'buy of a fee-on-transfer token: the Router moves it twice (pool to router, router to buyer), each taxed, but the buy tax is read as one move (D = (1 - t) * net), so it is over-stated (conservative), not measured as two'],
+  B: ['tx.origin has code (the injected probe)', 'transfer to the pair: the token contract balance is not read, so its tax is not measured',
+    'the quote safety buffer is not read: a tax is MEASURED only when it plus the protocol maximum (10 bps) is below maxTaxBps', 'no later sell (one block)', 'block number/time = pinned block B, not B+1',
+    'buy of a fee-on-transfer token: the Router moves it twice (pool to router, router to buyer), each taxed, but the buy tax is read as one move (D = (1 - t) * net), so it is over-stated (conservative), not measured as two'],
+  C: ['tx.origin = the funding address (has code if it is WETH)', 'msg.sender and recipient = Multicall3 (has code)', 'no later sell (one block)', 'no per-step gas (aggregate3Value returns none)', 'block number/time = pinned block B',
+    'transfer to the pair: a fee paid to another wallet that donates tokens back into the pair in the same transfer (no swap) offsets the pair balance; no balance read separates it, so that fee is understated',
+    'buy of a fee-on-transfer token: the Router moves it twice (pool to router, router to buyer), each taxed, but the buy tax is read as one move (D = (1 - t) * net), so it is over-stated (conservative), not measured as two'],
 };

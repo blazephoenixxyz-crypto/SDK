@@ -40,9 +40,15 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
 // X1: the later sale (tier A) reads lateA:s / lateB:s (tiers.ts:118 snap) but toResult never turns them into a
 // self delta and measure() never gates sellLaterTaxSwapBps on it (the V3 gate was applied to the sale at B only).
 const OK = () => ({ ok: true, gas: 40_000n, revertData: '0x' });
+// V5 fields (F1-F3): each quote as the Quoter publishes it, net of the 28 bps protocol fee rounded up and of a 0 safety
+// buffer (buy: 10_000 - ceil(10_000 * 28 / 10_000) = 9_972 = buyDelivered; sale: quoted = delivered, 4_990), and the
+// token's own and the pair's anchor balances still across the transfer to the pair.
 const clean = (): any => ({ unmeasured: 0n, quoteBuy: OK(), buy: OK(), buyHops: 1n, buyIn: 10_000n, buyPoolSent: 10_000n, buyDelivered: 9_972n,
+  buyQuotedNet: 9_972n, buySafetyBuffer: 0n,
   quoteSell: OK(), sellHops: 1n, sell: OK(), sellIn: 4_986n, sellPoolReceived: 4_986n, sellOut: 4_990n, sellTokenSelfDelta: 0n,
-  transfer: OK(), transferSent: 100n, transferReceived: 100n, poolTransfer: OK(), poolTransferSent: 100n, poolTransferReceived: 100n });
+  sellQuotedNet: 4_990n, sellSafetyBuffer: 0n,
+  transfer: OK(), transferSent: 100n, transferReceived: 100n, poolTransfer: OK(), poolTransferSent: 100n, poolTransferReceived: 100n,
+  poolTransferTokenSelfDelta: 0n, poolTransferPairAnchorDelta: 0n });
 test('[X1] toResult: the later sale with the token balance falling (swapback) carries no self delta', () => {
   const u = (v: bigint) => ({ ok: true, gas: null, ret: '0x' + v.toString(16).padStart(64, '0') });
   // seller sells 1000, taxed 50% (500 to the token), token swaps back 2000 into the pool: pool +2500, self -1500.
@@ -56,8 +62,13 @@ test('[X1] toResult: the later sale with the token balance falling (swapback) ca
   const mm = measure(full, { tier: 'A' }); const v = instrumentVerdict(mm, { maxTaxBps: 1000 });
   console.log(`X1 verdict: ${v.status} (${v.why}) sellLaterTaxSwapBps ${mm.sellLaterTaxSwapBps}`);
   // Same numbers at B are NOT_MEASURED (V3 gate): the later sale must not be weaker.
-  const atB = { ...clean(), sellIn: 1000n, sellPoolReceived: 2500n, sellOut: 500n, sellTokenSelfDelta: -1500n };
-  assert.equal(instrumentVerdict(measure(atB), { maxTaxBps: 1000 }).status, 'NOT_MEASURED');
+  // The scenario's pool price is 1 wei per 2 tokens, so the same-state quote for the 1000 sold is 500 wei, computed from
+  // sellIn and that price (not from sellOut): economic tax 0. The pool got 2500 for 1000 sold (wei over-credit, V5-5) and the self balance fell (V3 gate): not measured.
+  const PRICE = [1n, 2n] as const, sellIn = 1000n;
+  const atB = { ...clean(), sellIn, sellPoolReceived: 2500n, sellOut: 500n, sellQuotedNet: (sellIn * PRICE[0]) / PRICE[1], sellTokenSelfDelta: -1500n };
+  const mB = measure(atB), vB = instrumentVerdict(mB, { maxTaxBps: 1000 });
+  assert.equal(mB.sellEconBps, 0n); assert.equal(mB.sellTaxSwapBps, null);
+  assert.equal(vB.status, 'NOT_MEASURED'); assert.equal(vB.why, 'receiver credited more than sent');
   assert.notEqual(v.status, 'MEASURED', `later sale: ${v.why}`);
 });
 
@@ -73,7 +84,7 @@ test('[X0] controls: swapback larger than the tax at B is NOT MEASURED; plain 20
 
 // ---- Fix X1-X3: unit gamut per guard (each line names the mutant that turns it red).
 const later = (o: any = {}): any => ({ ...clean(), tier: 'A', quoteLater: { ok: true }, sellLater: OK(), sellLaterIn: 1_000n, sellLaterOut: 990n,
-  sellLaterPoolReceived: 1_000n, sellLaterTokenSelfDelta: 0n, ...o });
+  sellLaterPoolReceived: 1_000n, sellLaterTokenSelfDelta: 0n, sellLaterQuotedNet: 990n, sellLaterSafetyBuffer: 0n, ...o });
 const verdictOf = (r: any) => { const m = measure(r, { tier: r.tier }); return { m, v: instrumentVerdict(m, { maxTaxBps: 1000 }) }; };
 
 test('[X-happy] clean sale and later sale with a still token balance: MEASURED with exact taxes', () => {
@@ -90,7 +101,9 @@ test('[X-happy] clean sale and later sale with a still token balance: MEASURED w
 for (const [name, d] of [['absent', undefined], ['null', null], ['+1 wei', 1n], ['-1 wei', -1n], ['+tax', 10n ** 18n]] as const) {
   test(`[X1-gate] later sale, token self delta ${name}: later tax not measured, NOT_MEASURED`, () => {
     const { m, v } = verdictOf(later({ sellLaterTokenSelfDelta: d }));
-    assert.equal(m.sellLaterTaxSwapBps, null); assert.equal(v.status, 'NOT_MEASURED', v.why);
+    // '+tax': the token's own balance rose by 1e18 on 1000 sold, a tax floor >= 1000 bps (taxFloorBps), so the
+    // floor condemns; the swap-side reading stays null either way. '+1 wei' is a 10 bps floor, below the max.
+    assert.equal(m.sellLaterTaxSwapBps, null); assert.equal(v.status, name === '+tax' ? 'CONDEMN' : 'NOT_MEASURED', v.why);
   });
 }
 
@@ -98,7 +111,8 @@ for (const [name, d] of [['absent', undefined], ['null', null], ['+1 wei', 1n], 
 for (const [name, d] of [['+1 wei', 1n], ['+tax', 10n ** 18n], ['-1 wei', -1n], ['absent', undefined]] as const) {
   test(`[X2-gate] sale, token self delta ${name}: swap-side tax not measured, NOT_MEASURED`, () => {
     const { m, v } = verdictOf({ ...clean(), sellTokenSelfDelta: d });
-    assert.equal(m.sellTaxSwapBps, null); assert.equal(v.status, 'NOT_MEASURED', v.why);
+    // '+tax': a self-balance rise of 1e18 on the amount sold is a tax floor >= 1000 bps (taxFloorBps): CONDEMN.
+    assert.equal(m.sellTaxSwapBps, null); assert.equal(v.status, name === '+tax' ? 'CONDEMN' : 'NOT_MEASURED', v.why);
   });
 }
 
