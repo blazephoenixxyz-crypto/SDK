@@ -375,8 +375,9 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
     if (a.w === null || b.w === null) r.unmeasured |= UM.WETH;
     if (!a.okP || !b.okP || pv4(known.routeSell, 0)) r.unmeasured |= UM.POOL_SELL;
     if (a.s === null || b.s === null) r.unmeasured |= UM.SELF;
-    if (r.sell.ok && a.x !== null && b.x !== null && a.w !== null && b.w !== null) {
-      r.sellIn = a.x > b.x ? a.x - b.x : 0n; r.sellOut = b.w > a.w ? b.w - a.w : 0n;
+    // Each amount from its own reads (5n): S, the pool and self deltas need the seller's balance, not WETH; sellOut needs WETH.
+    if (r.sell.ok && a.x !== null && b.x !== null) {
+      r.sellIn = a.x > b.x ? a.x - b.x : 0n; if (a.w !== null && b.w !== null) r.sellOut = b.w > a.w ? b.w - a.w : 0n;
       r.sellPoolReceived = b.pools - a.pools; r.sellTokenSelfDelta = (b.s ?? 0n) - (a.s ?? 0n);
     }
   }
@@ -386,9 +387,9 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
     const x0 = u256(m[`${p}:x0`]), x1 = u256(m[`${p}:x1`]), y0 = u256(m[`${p}:y0`]), y1 = u256(m[`${p}:y1`]);
     if (x0 === null || x1 === null) r.unmeasured |= UM.BAL_X;
     if (y0 === null || y1 === null) r.unmeasured |= um;
-    if (r[name].ok && x0 !== null && x1 !== null && y0 !== null && y1 !== null) {
-      r[name + 'Sent'] = x0 > x1 ? x0 - x1 : 0n; r[name + 'Received'] = y1 > y0 ? y1 - y0 : 0n;
-    }
+    // The seller's debit needs only the seller's balance (5n): an unread receiver must not drop the own-balance floor.
+    if (r[name].ok && x0 !== null && x1 !== null) r[name + 'Sent'] = x0 > x1 ? x0 - x1 : 0n;
+    if (r[name].ok && x0 !== null && x1 !== null && y0 !== null && y1 !== null) r[name + 'Received'] = y1 > y0 ? y1 - y0 : 0n;
   }
   if (m.poolTransfer) {
     // Unread stays absent (not measured), never 0 (F3).
