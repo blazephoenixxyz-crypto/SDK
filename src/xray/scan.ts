@@ -9,7 +9,8 @@ import { prepareA, prepareB, prepareC, prepareProbe, decodeA, decodeC, advance, 
   classifyToken, classifyProbe, selectTier, aRetry, TIER_UNCOVERED, TIER_LIMITS } from './tiers.js';
 
 export type Gen<R> = Generator<Rpc[], R, unknown[]>;
-const J = (o: any) => JSON.stringify(o, (k, v) => (typeof v === 'bigint' ? v.toString() : v));
+/** Diagnostic text only, best effort: an unserialisable reply (circular, throwing getter) never replaces the classification. */
+const J = (o: any): string => { try { return String(JSON.stringify(o, (k, v) => (typeof v === 'bigint' ? v.toString() : v))); } catch { return '[unserialisable reply]'; } };
 
 /** One request out, one reply in; a JSON-RPC result or error becomes its envelope, anything else stays as it came. */
 export function* ask(req: { method: string; params: unknown[] }): Gen<any> {

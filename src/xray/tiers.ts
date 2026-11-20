@@ -40,7 +40,7 @@ const UNAVAIL: any = { cls: 'unavailable', why: 'provider unavailable' };
 export function classifyProbe(tier: any, resp: any) {
   const k = classifyRpcReply(resp);
   if (k.cls === 'unavailable') return { ...UNAVAIL };
-  const pe: any = k.cls === 'error' ? { code: k.code, data: k.data } : {};
+  const pe: any = k.cls === 'error' ? { code: k.code, data: k.data, missing: k.tierMissing } : {};
   if (k.cls === 'result' && k.result !== null) {
     const r: any = k.result;
     if (tier === 'A') {
@@ -56,7 +56,8 @@ export function classifyProbe(tier: any, resp: any) {
     if (!rs || rs.length !== 1) return { cls: 'down', code: null, why: 'probe answer shape' };
     return rs[0].success ? { cls: 'ok' } : { cls: 'reverted', why: 'probe reverted' };
   }
-  if (pe.code === 3 || pe.data !== undefined) return { cls: 'reverted', why: 'probe reverted' };
+  // -32601 may carry `data` (JSON-RPC 2.0 §5.1): a missing method is a missing tier before any revert reading.
+  if (!pe.missing && (pe.code === 3 || pe.data !== undefined)) return { cls: 'reverted', why: 'probe reverted' };
   return { cls: 'down', code: pe.code ?? null, why: `probe error ${pe.code ?? '?'}` };
 }
 
@@ -255,8 +256,10 @@ export function prepareProbe(rung: any, ctx: any, id: any = 1) {
 // ---------------------------------------------------------------- decoding
 /** Per-step results {ok, gas|null, ret} keyed by step id; null when the top-level answer is not usable. */
 export function decodeA(steps: any, resp: any) {
-  if (!Array.isArray(resp?.result)) return null;
+  // A null or non-object block or call entry is an unusable answer (null -> NOT_MEASURED), never a TypeError.
+  if (!Array.isArray(resp?.result) || resp.result.some((b: any) => !b || typeof b !== 'object')) return null;
   const flat = resp.result.flatMap((b: any) => b.calls ?? []);
+  if (flat.some((c: any) => !c || typeof c !== 'object')) return null;
   if (flat.length !== steps.length) return null;
   const m: any = {};
   steps.forEach((s: any, i: any) => {
@@ -304,9 +307,10 @@ export function advance(ctx: any, known: any, m: any, tier: any) {
   }
   if (k.sellAmt === undefined) {
     if (!m.buy?.ok) return { known: k, done: true, why: 'buy reverted' };
-    const held = u256(m['buyB:x']);
-    if (held === null) return { known: k, done: true, why: 'balance after buy not measured' };
-    k.sellAmt = (held * ctx.sellFracBps) / BPS;
+    // Sized from what this buy delivered (the XRayProbe actor is fresh; Multicall3 at C may already hold the token).
+    const held0 = u256(m['buyA:x']), held = u256(m['buyB:x']);
+    if (held0 === null || held === null) return { known: k, done: true, why: 'balance after buy not measured' };
+    k.sellAmt = held > held0 ? ((held - held0) * ctx.sellFracBps) / BPS : 0n;
     return { known: k, done: k.sellAmt === 0n, why: k.sellAmt === 0n ? 'nothing to sell' : undefined };
   }
   if (!k.routeSell) {
@@ -349,7 +353,7 @@ function snapVals(m: any, tag: any) {
 export function toResult(ctx: any, known: any, m: any, tier: any) {
   const r: any = { tier, wrap: step(m.wrap), approveIn: step(m.approveIn), quoteBuy: step(m.quoteBuy), buy: step(m.buy), approveOut: step(m.approveOut),
     quoteSell: step(m.quoteSell), sell: step(m.sell), transfer: step(m.transfer), poolTransfer: step(m.poolTransfer), unmeasured: 0n,
-    buyIn: 0n, buyQuotedNet: 0n, buyDelivered: 0n, buyPoolSent: 0n, buyHops: 0n, sellIn: 0n, sellPoolReceived: 0n, sellTokenSelfDelta: 0n,
+    buyQuotedNet: 0n, buyDelivered: 0n, buyPoolSent: 0n, buyHops: 0n, sellIn: 0n, sellPoolReceived: 0n, sellTokenSelfDelta: 0n,
     sellOut: 0n, sellQuotedNet: 0n, sellHops: 0n, transferSent: 0n, transferReceived: 0n, poolTransferTo: known.poolTransferTo ?? null,
     poolTransferSent: 0n, poolTransferReceived: 0n };
   r.approveIn.ok = boolOk(m.approveIn);

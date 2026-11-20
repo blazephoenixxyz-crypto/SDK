@@ -176,8 +176,9 @@ export function fakeNode(o: FakeOpts = {}) {
     if (req.method === 'eth_getBlockByNumber') return R(header(parseInt(req.params[0], 16)));
     if (req.method === 'eth_getCode') return R(code(req.params[0]));
     const rung = rungOf(req);
-    if (isProbe(req)) { const inj = o.probe?.[rung]; if (inj) return inj; }
-    else { round[rung] = (round[rung] ?? 0) + 1; const inj = o.tokenErr?.[rung]?.[round[rung]]; if (inj) return inj; }
+    // The key decides, not the value: an injected null is a reply (provider unavailable); an absent key keeps the default.
+    if (isProbe(req)) { if (o.probe && Object.hasOwn(o.probe, rung)) return o.probe[rung]; }
+    else { round[rung] = (round[rung] ?? 0) + 1; const t = o.tokenErr?.[rung]; if (t && Object.hasOwn(t, round[rung])) return t[round[rung]]; }
     if (req.method === 'eth_simulateV1') {
       const bsc = req.params[0].blockStateCalls;
       if (o.nodeclockErr && bsc.some((b: any) => b.blockOverrides?.number && b.blockOverrides?.time)) return E(-38021, 'block timestamps must be in order: 1794517811 <= 1794518979');

@@ -219,7 +219,7 @@ function economics(r: ProbeResult, out: Measure, t: unknown): void {
  * after the transfer = what the pair credits the seller. Absent = null (not measured), never a value.
  */
 const ZERO_ADDR = /^0x0{40}$/i;
-export function measureDirectSell(d: any): { directSellOk: boolean | null; directSellTaxBps: bigint | null } {
+export function measureDirectSell(d: any): { directSellOk: boolean | null; directSellTaxBps: bigint | null; overCredit?: true } {
   const none = { directSellOk: null, directSellTaxBps: null };
   if (d === undefined || d === null) return none;
   if (!('ok' in d) || 'direct' in d || 'directPool' in d) {
@@ -230,6 +230,8 @@ export function measureDirectSell(d: any): { directSellOk: boolean | null; direc
     d = { ok: d.direct.ok, sent: d.directSent, askIn: d.directAskIn, wethOut: d.directOut };
   }
   const ok = d.ok === true && B(d.wethOut ?? 0) > 0n;
+  // Compared in wei before rounding (as tax()): credited above what was sent is an over-credit, never a 0 bps tax.
+  if (ok && B(d.askIn) > B(d.sent)) return { directSellOk: ok, directSellTaxBps: null, overCredit: true };
   return { directSellOk: ok, directSellTaxBps: ok ? lossBps(d.askIn, d.sent) : null };
 }
 

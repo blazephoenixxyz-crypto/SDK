@@ -1,7 +1,10 @@
 // Sans-IO stepping (DEEP §3.0): a Program is a generator that yields batches of exact JSON-RPC requests
 // (no id) and receives the answers. The state is serialisable and carries the canonical input, its
 // keccak and the pinned block; every step replays the recorded answers, so no server keeps state.
-// A tampered or foreign state fails closed with state_mismatch. runProgram is the only loop with I/O.
+// A foreign state, or one whose input, inputHash, pinned block or answer count was changed, fails closed with
+// state_mismatch. A changed recorded reply that leaves the pin and the input as they were (e.g. the chain-id reply)
+// is NOT detected and changes the result: the state is not tamper-proof, the caller must trust the saved transcript.
+// runProgram is the only loop with I/O.
 import { keccak256, toHex } from 'viem';
 
 export type Rpc = { method: string; params: unknown[] };
@@ -97,9 +100,13 @@ export function stepProgram<I, R>(program: Program<I, R>, state: State, response
   if ((pb === null) !== (sb === null) || (pb && sb && (pb.number !== sb.number || pb.hash !== sb.hash))) throw new XrayError('state_mismatch', 'pinned block');
   if (run.res.done) throw new XrayError('state_mismatch', 'program already done');
   if (!Array.isArray(responses) || responses.length !== run.res.value.length) throw new XrayError('bad_responses', `expected ${run.res.value.length} responses`);
-  run.res = run.gen.next(responses);
+  // The transcript keeps its own copy of the batch and of every reply: a later change by the transport reaches neither
+  // this step nor the replay of the next one.
+  let rs: unknown[];
+  try { rs = structuredClone(responses); } catch { throw new XrayError('bad_responses', 'replies must be cloneable data'); }
+  run.res = run.gen.next(rs);
   const base = { v: 1 as const, inputHash: state.inputHash, input: state.input };
-  return emit(run, base, [...state.answers, responses]);
+  return emit(run, base, [...state.answers, rs]);
 }
 
 /** The only loop with I/O: the transport answers each batch in order. */
