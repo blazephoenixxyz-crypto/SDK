@@ -191,7 +191,7 @@ guesses a token from a ticker.
 ```ts
 const v = await blaze.usdValue({ chain: 'base', token: '0x…', amountIn: 10n ** 18n });
 // v.label 'USD (via USDC)', v.usdValue (dollar-token base units), v.usd, v.unitPrice, v.vias, v.spread,
-// v.blockNumber, v.rpc.requests (1 or 2)
+// v.blockNumber, v.rpc.requests (1 to 4)
 ```
 
 The USD value of an amount, read on the Quoter only: no oracle, no price API. The dollar token
@@ -207,9 +207,20 @@ The USD value of an amount, read on the Quoter only: no oracle, no price API. Th
   bps) shows how far they are apart; there is no threshold and no verdict.
 - **"not measured", never 0.** A via whose call reverts, whose route has 0 hops or whose `netOut` is 0
   measured nothing. If no via measured, `usdValue` is `null` and `usd` is `'not measured'`.
-- **1 or 2 eth_calls.** One `Multicall3.aggregate3` eth_call reads the block number, the
-  decimals and every quote; a second one, pinned to the same block, runs only when the direct
-  route touches more tokens. `rpc.requests` counts these eth_calls only: the client's own setup
+- **One block, pinned by hash.** The client reads the block header (`eth_getBlockByNumber`, `latest`
+  or your `blockNumber`) and runs every eth_call of one `usdValue` at that block's hash (EIP-1898,
+  `requireCanonical: true`), never at a block number: after a reorg a number names another block.
+  The block read inside the call must equal the header's number, and a pinned `blockNumber` must
+  get its own header; otherwise it is an `rpc_error`.
+- **"not measured" is a result, not an error.** If the node loses the block between the calls
+  (a reorg), discovery restarts on a new block, at most `USD_SNAPSHOT_TRIES` (2) snapshots. If the
+  block is lost every time, or the node takes no `blockHash` block parameter, `usdValue` returns
+  `'not measured'` (`usdValue`, `blockNumber`, `dollarDecimals` and `tokenDecimals` `null`, no vias)
+  instead of throwing, and never falls back to a read by number. `usdNotMeasured` builds it.
+- **1 to 4 eth_calls.** One `Multicall3.aggregate3` eth_call reads the block number, the
+  decimals and every quote; a second one, at the same block hash, runs only when the direct
+  route touches more tokens; a restart repeats both. `rpc.requests` counts these eth_calls (a
+  failed one included), not the header reads: the client's own setup
   can add requests the first time a chain is used (`eth_chainId` once per node, and the on-chain
   check of a deployment taken from the remote registry). On Arbitrum and Robinhood Chain the block
   number is read from ArbSys (`arbBlockNumber()`), because `block.number` there is the L1 block,

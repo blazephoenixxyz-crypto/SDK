@@ -49,7 +49,7 @@ export {
   type ApproveOptions, type Permit2Transfer,
 } from './erc20.js';
 export {
-  usdFromVias, MULTICALL3, USD_MAX_VIAS,
+  usdFromVias, usdNotMeasured, MULTICALL3, USD_MAX_VIAS, USD_SNAPSHOT_TRIES,
   type UsdValue, type UsdValueRequest, type UsdVia, type UsdLeg, type UsdSpread, type UsdReadings, type UsdViaReading, type UsdLegReading,
 } from './usd.js';
 export { toJSON, type Jsonify } from './json.js';

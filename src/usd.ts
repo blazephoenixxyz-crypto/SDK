@@ -2,7 +2,8 @@
 //  USD value of a token amount, measured on the BlazePhoenix Quoter and nothing
 //  else: no oracle, no price API. Every number is the netOut the Quoter answers
 //  for a real amount (after the protocol fee, including price impact), read in
-//  ONE Multicall3.aggregate3 eth_call so every via comes from the same block.
+//  Multicall3.aggregate3 eth_calls pinned to ONE block hash (EIP-1898), so every
+//  via comes from the same block, even across a reorg.
 //
 //  The dollar token (CHAINS[chain].usdc: USDC, or USDG on Robinhood Chain) is
 //  taken as 1 USD. The value is the MINIMUM over the vias that measured
@@ -31,6 +32,9 @@ export const ARBSYS_ABI = parseAbi(['function arbBlockNumber() view returns (uin
 /** Chains whose block number is read from ArbSys: Arbitrum One and Robinhood Chain (Orbit). */
 export const ARBSYS_BLOCK_CHAINS: readonly number[] = [42161, 4663];
 
+/** Block snapshots one usdValue takes: a reorg that drops the pinned block hash restarts
+ *  route discovery once on a new block; after that the value is 'not measured'. */
+export const USD_SNAPSHOT_TRIES = 2;
 /** Vias per call, the direct one included. */
 export const USD_MAX_VIAS = 8;
 /** WETH → dollar leg is priced at 1 WETH and scaled. */
@@ -79,11 +83,14 @@ export interface UsdValue {
   /** "USD (via USDC)", or "USD (via USDG)" on Robinhood Chain: the dollar token is taken as 1 USD. */
   label: string;
   dollarToken: Address;
-  dollarDecimals: number;
+  /** null when not measured: no block held for the reads. */
+  dollarDecimals: number | null;
   token: Address;
   amountIn: bigint;
   tokenDecimals: number | null;
-  blockNumber: bigint;
+  /** The block every read ran in (pinned by its hash); null when no block hash held through the
+   *  reads in USD_SNAPSHOT_TRIES snapshots (reorgs, or a node without EIP-1898 blockHash). */
+  blockNumber: bigint | null;
   /** Minimum over the measured vias, in dollar-token base units; null when no via measured. */
   usdValue: bigint | null;
   /** usdValue in dollar units, or 'not measured' (never "0"). */
@@ -93,7 +100,8 @@ export interface UsdValue {
   vias: UsdVia[];
   /** Over the measured vias, when there are at least two. No threshold, no verdict. */
   spread: UsdSpread | null;
-  /** The usdValue eth_calls (1 or 2); client setup (eth_chainId, registry checks) is not counted. */
+  /** The usdValue eth_calls sent, a failed one included (1 or 2 per snapshot, at most 4); the block
+   *  header read and client setup (eth_chainId, registry checks) are not counted. */
   rpc: { requests: number };
   basis: string;
 }
@@ -168,9 +176,27 @@ function measure(v: UsdViaReading): UsdVia {
 
 /** The USD value from Quoter readings (pure: no RPC). The SDK's usdValue() and the hosted
  *  decoder share it. Value = MIN over the measured vias; none measured → null, never 0. */
+function checkAmount(amountIn: bigint) {
+  if (amountIn <= 0n) throw new BlazeError('bad_request', 'amount must be > 0');
+  if (amountIn > UINT128_MAX) throw new BlazeError('bad_request', 'amount exceeds uint128 (the Router refuses it)');
+}
+const symbolOf = (chainId: number) => (chainId === 4663 ? 'USDG' : 'USDC');
+const basisOf = (symbol: string) => `The netOut the Quoter answers for amountIn, after the ${FEE_BPS / 100}% fee and including price impact, `
+  + `with ${symbol} taken as 1 USD; the minimum over the measured vias; X→${symbol} legs priced at refX and scaled linearly.`;
+
+/** The answer when no block hash held through the reads: no value, no block, no via; never 0. */
+export function usdNotMeasured(r: { chainId: number; version: string; dollarToken: Address; token: Address; amountIn: bigint; rpcRequests: number }): UsdValue {
+  checkAmount(r.amountIn);
+  const symbol = symbolOf(r.chainId);
+  return {
+    chainId: r.chainId, version: r.version, label: `USD (via ${symbol})`, dollarToken: r.dollarToken, dollarDecimals: null,
+    token: r.token, amountIn: r.amountIn, tokenDecimals: null, blockNumber: null, usdValue: null, usd: 'not measured',
+    unitPrice: 'not measured', vias: [], spread: null, rpc: { requests: r.rpcRequests }, basis: basisOf(symbol),
+  };
+}
+
 export function usdFromVias(r: UsdReadings): UsdValue {
-  if (r.amountIn <= 0n) throw new BlazeError('bad_request', 'amount must be > 0');
-  if (r.amountIn > UINT128_MAX) throw new BlazeError('bad_request', 'amount exceeds uint128 (the Router refuses it)');
+  checkAmount(r.amountIn);
   const identity = same(r.token, r.dollarToken);
   const vias: UsdVia[] = identity
     ? [{ path: [r.dollarToken], status: 'identity', usd: r.amountIn, legs: [] }]
@@ -184,7 +210,7 @@ export function usdFromVias(r: UsdReadings): UsdValue {
   const unit = usdValue === null || r.tokenDecimals === null
     ? 'not measured'
     : formatUnits((usdValue * 10n ** BigInt(r.tokenDecimals + 18)) / (r.amountIn * 10n ** BigInt(r.dollarDecimals)), 18);
-  const symbol = r.chainId === 4663 ? 'USDG' : 'USDC';
+  const symbol = symbolOf(r.chainId);
   return {
     chainId: r.chainId,
     version: r.version,
@@ -201,7 +227,6 @@ export function usdFromVias(r: UsdReadings): UsdValue {
     vias,
     spread,
     rpc: { requests: r.rpcRequests },
-    basis: `The netOut the Quoter answers for amountIn, after the ${FEE_BPS / 100}% fee and including price impact, `
-      + `with ${symbol} taken as 1 USD; the minimum over the measured vias; X→${symbol} legs priced at refX and scaled linearly.`,
+    basis: basisOf(symbol),
   };
 }

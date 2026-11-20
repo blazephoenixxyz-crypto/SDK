@@ -1,6 +1,7 @@
 // Offline conformance tests — no network, no chain. Run: npm test
 // A mock EIP-1193 provider plays "your node": it answers eth_chainId, eth_call
 // (Quoter/Router/ERC-20, encoded with the real ABIs), eth_getCode and getLogs.
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -307,16 +308,30 @@ interface MockOpts {
   exactFor?: (amountIn: bigint) => bigint;   // what previewPlanExact answers (default outFor − 5)
   exactPool?: Address;                       // previewPlanExact prices a different pool
   // previewPlan per pair: the netOut (and optionally the hops) the Quoter answers, or its revert data
-  usd?: (tIn: Address, tOut: Address, amountIn: bigint) => { netOut: bigint; hops?: Hop[] } | { revert: Hex };
+  // previewPlan per pair: `at` is the block it runs in (height, and gen = reorgs at that height)
+  usd?: (tIn: Address, tOut: Address, amountIn: bigint, at: MockBlock) => { netOut: bigint; hops?: Hop[] } | { revert: Hex };
   decimalsFor?: Record<string, number | 'revert'>;   // decimals() per lowercase address
   arbsysEmpty?: boolean;                             // ArbSys (0x64) answers no data, as on a chain without it
+  noBlockHash?: boolean;                             // the node refuses an EIP-1898 { blockHash } block parameter
+  headerSkew?: bigint;                               // eth_getBlockByNumber reports a number this far off the block its hash names
+  headerOther?: bigint;                              // eth_getBlockByNumber answers the whole header (number and hash) of a block this far off the one asked
+  afterMulticall?: (k: number, at: MockBlock, chain: MockChain) => void;   // runs after the k-th Multicall3 call (1-based)
 }
+interface MockBlock { height: bigint; gen: number }
+interface MockChain { reorg(height: bigint): void; advance(blocks: bigint): void; head(): bigint; hashOf(height: bigint): Hex }
 function mockProvider(o: MockOpts = {}) {
   const calls: { method: string; fn?: string; to?: string; block?: unknown }[] = [];
   const quoter = (o.quoter ?? V1.quoter).toLowerCase();
   const router = (o.router ?? V1.router).toLowerCase();
   const outFor = o.outFor ?? ((a: bigint) => a * 3_000n / 10n ** 12n);
-  let head = 0x100n;                // 'latest' moves one block per Multicall3 call
+  let head = 0x100n;                // 'latest' moves one block per Multicall3 call or header read
+  // Block hashes: height in the first 24 bytes, the reorg generation in the last 8. A reorg at a
+  // height replaces its hash; the old hash is then unknown to the node (EIP-1898 lookup fails).
+  const gens = new Map<bigint, number>();
+  const hashOf = (h: bigint, g = gens.get(h) ?? 0): Hex => `0x${h.toString(16).padStart(48, '0')}${g.toString(16).padStart(16, '0')}`;
+  const chain: MockChain = { reorg: (h) => { gens.set(h, (gens.get(h) ?? 0) + 1); }, advance: (n) => { head += n; }, head: () => head, hashOf: (h) => hashOf(h) };
+  let multicalls = 0;
+  let cur: MockBlock = { height: head, gen: 0 };
   const provider = {
     async request({ method, params }: { method: string; params?: unknown }) {
       const p = params as unknown[];
@@ -330,6 +345,12 @@ function mockProvider(o: MockOpts = {}) {
         const to = f.toBlock && f.toBlock !== 'latest' ? BigInt(f.toBlock) : 1n << 64n;
         return from <= 0xffn && 0xffn <= to ? logsFixture(router as Address) : [];
       }
+      if (method === 'eth_getBlockByNumber') {
+        calls.push({ method, block: p[0] });
+        const tag = p[0] as string;
+        const h = (tag.startsWith('0x') ? BigInt(tag) : (head += 1n)) + (o.headerOther ?? 0n);
+        return { number: `0x${(h + (o.headerSkew ?? 0n)).toString(16)}`, hash: hashOf(h), parentHash: hashOf(h - 1n), timestamp: '0x65000000' };
+      }
       if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
       const { to, data, from: caller } = p[0] as { to: string; data: Hex; from?: string };
       const t = to.toLowerCase();
@@ -339,7 +360,15 @@ function mockProvider(o: MockOpts = {}) {
         const d = decodeFunctionData({ abi: MULTICALL3_ABI, data });
         const tag = p[1];
         calls.push({ method, fn: `multicall.${d.functionName}`, to: t, block: tag });
-        const at = typeof tag === 'string' && tag.startsWith('0x') ? BigInt(tag) : (head += 1n);
+        let at: bigint;
+        if (tag !== null && typeof tag === 'object') {
+          if (o.noBlockHash) throw Object.assign(new Error('invalid argument 1: json: cannot unmarshal object into Go value of type string'), { code: -32602 });
+          const bh = (tag as { blockHash: string }).blockHash;
+          at = BigInt(`0x${bh.slice(2, 50)}`);
+          if (bh !== hashOf(at)) throw Object.assign(new Error(`header for hash ${bh} not found`), { code: -32000 });
+        } else at = typeof tag === 'string' && tag.startsWith('0x') ? BigInt(tag) : (head += 1n);
+        cur = { height: at, gen: gens.get(at) ?? 0 };
+        const k = ++multicalls;
         // Arbitrum and Robinhood Chain (Orbit), measured live 11-20: block.number, so
         // Multicall3.getBlockNumber, is the L1 block; ArbSys(0x64).arbBlockNumber() is the
         // block the tag names. Elsewhere 0x64 has no code: success with no data.
@@ -359,6 +388,7 @@ function mockProvider(o: MockOpts = {}) {
             results.push({ success: false, returnData: ((e as { data?: Hex }).data ?? '0x') as Hex });
           }
         }
+        o.afterMulticall?.(k, cur, chain);
         return encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'aggregate3', result: results });
       }
       if (t === quoter) {
@@ -376,7 +406,7 @@ function mockProvider(o: MockOpts = {}) {
           case 'previewPlan': case 'previewPlanWithMinOut': {
             const [tIn, tOut, amt, umo] = d.args as unknown as [Address, Address, bigint, bigint?];
             if (o.usd) {
-              const u = o.usd(tIn, tOut, amt);
+              const u = o.usd(tIn, tOut, amt, cur);
               if ('revert' in u) throw Object.assign(new Error('execution reverted'), { code: 3, data: u.revert });
               const r = { ...mkRoute(tIn, tOut, amt, u.netOut), ...(u.hops ? { hops: u.hops } : {}) };
               return encodeFunctionResult({ abi: QUOTER_ABI, functionName: d.functionName, result: [{ ...mkPreview(r, umo ?? 0n), netOut: u.netOut }, r, false] as never });
@@ -449,7 +479,7 @@ function mockProvider(o: MockOpts = {}) {
       throw new Error(`erc20 fn ${d.functionName}`);
     },
   };
-  return { provider, calls };
+  return { provider, calls, chain };
 }
 
 function logsFixture(router: Address) {
@@ -977,6 +1007,9 @@ console.log('client · usdValue');
     (a: Address, b: Address, amt: bigint): Ans => m[key(a, b)]?.(amt) ?? { revert: NO_ROUTE };
   const hop = (a: Address, b: Address, amt: bigint): Hop => mkRoute(a, b, amt, 1n).hops[0]!;
   const usdc6 = { [USDC.toLowerCase()]: 6 };
+  // The EIP-1898 block parameter both aggregates carry: the hash of the header read first.
+  const pin = (h: bigint, g = 0) => ({ blockHash: `0x${h.toString(16).padStart(48, '0')}${g.toString(16).padStart(16, '0')}`, requireCanonical: true });
+  const A = 10n ** 18n;
   const setup = (o: MockOpts) => {
     const { provider, calls } = mockProvider({ decimalsFor: usdc6, ...o });
     const blaze = new BlazePhoenix({ rpc: { base: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
@@ -1072,7 +1105,6 @@ console.log('client · usdValue');
   }
   // route-discovered X (2 hops) — mutant: request 2 not pinned to request 1's block
   {
-    const A = 10n ** 18n;
     const { blaze, agg } = setup({ usd: table({
       [key(TKN, USDC)]: (a) => ({ netOut: 5_000_000n, hops: [hop(TKN, X(1), a), hop(X(1), USDC, 7n * 10n ** 18n)] }),
       [key(TKN, WETH)]: () => ({ netOut: 10n ** 15n }),
@@ -1084,7 +1116,7 @@ console.log('client · usdValue');
     const blocks = agg().map((c) => c.block);
     eq('usdValue: a token on the direct route adds a via, read in a second eth_call at the same block',
       [v.rpc.requests, blocks, v.blockNumber, v.vias.map((x) => [x.path, x.usd, x.scaledFrom]), v.usdValue],
-      [2, ['latest', '0x101'], 0x101n,
+      [2, [pin(0x101n), pin(0x101n)], 0x101n,
         [[[TKN, USDC], 5_000_000n, undefined], [[TKN, WETH, USDC], 3_000_000n, 10n ** 18n], [[TKN, X(1), USDC], 4_000_000n, 7n * 10n ** 18n]],
         3_000_000n]);
   }
@@ -1103,7 +1135,7 @@ console.log('client · usdValue');
     const v = await blaze.usdValue({ chain: 'arbitrum', token: TKN, amountIn: 10n ** 18n });
     eq('usdValue on Arbitrum: the block is ArbSys.arbBlockNumber (the block RPC tags count), not the L1 block.number; request 2 is pinned to it',
       [v.rpc.requests, calls.filter((c) => c.fn === 'multicall.aggregate3').map((c) => c.block), v.blockNumber, v.usdValue],
-      [2, ['latest', '0x101'], 0x101n, 3_000_000n]);
+      [2, [pin(0x101n), pin(0x101n)], 0x101n, 3_000_000n]);
   }
   // Robinhood Chain (Orbit) at a given block — mutant: 4663 left out of ARBSYS_BLOCK_CHAINS
   {
@@ -1113,7 +1145,7 @@ console.log('client · usdValue');
     const blaze = new BlazePhoenix({ rpc: { robinhood: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
     const v = await blaze.usdValue({ chain: 'robinhood', token: TKN, amountIn: 10n ** 18n, blockNumber: 0x200n });
     eq('usdValue on Robinhood Chain: the reported block is the pinned block, read from ArbSys',
-      [calls.filter((c) => c.fn === 'multicall.aggregate3').map((c) => c.block), v.blockNumber, v.usdValue], [['0x200'], 0x200n, 2_000_000n]);
+      [calls.filter((c) => c.fn === 'multicall.aggregate3').map((c) => c.block), v.blockNumber, v.usdValue], [[pin(0x200n)], 0x200n, 2_000_000n]);
   }
   // ArbSys answers nothing — mutant: the decode error of blockOf not wrapped (a raw viem error, or a value)
   {
@@ -1182,7 +1214,131 @@ console.log('client · usdValue');
   {
     const { blaze, agg } = setup({ usd: table({ [key(TKN, USDC)]: () => ({ netOut: 2_000_000n }) }) });
     const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: 10n ** 18n, blockNumber: 0x500n });
-    eq('usdValue: blockNumber pins the read', [agg().map((c) => c.block), v.blockNumber], [['0x500'], 0x500n]);
+    eq('usdValue: blockNumber pins the read', [agg().map((c) => c.block), v.blockNumber], [[pin(0x500n)], 0x500n]);
+  }
+  // A block number names whatever block holds that height now; a block hash names one block.
+  // Gen 1 of a height is the block that replaced it in a reorg: X(1) → USDC answers 1 there.
+  const reorgTable = table({
+    [key(TKN, USDC)]: (a) => ({ netOut: 5_000_000n, hops: [hop(TKN, X(1), a), hop(X(1), USDC, 7n * 10n ** 18n)] }),
+    [key(TKN, WETH)]: () => ({ netOut: 10n ** 15n }),
+    [key(WETH, USDC)]: () => ({ netOut: 3_000_000_000n }),
+    [key(TKN, X(1))]: () => ({ netOut: 7n * 10n ** 18n }),
+    [key(X(1), USDC)]: () => ({ netOut: 4_000_000n }),
+  });
+  const reorgUsd: MockOpts['usd'] = (a, b, amt, at) =>
+    (at.gen > 0 && key(a, b) === key(X(1), USDC) ? { netOut: 1n } : reorgTable(a, b, amt));
+  // reorg between the two aggregates — mutants: the aggregates pinned by number, not by hash (request 2
+  // reads the block that replaced the snapshot: X(1) discovered on one block, valued on another, usdValue 1n
+  // at 0x101); one snapshot only (no restart)
+  {
+    const { blaze, agg } = setup({ usd: reorgUsd, afterMulticall: (k, at, c) => { if (k === 1) c.reorg(at.height); } });
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A });
+    eq('usdValue: a reorg between the aggregates restarts discovery on a new block, never mixes the two',
+      [v.blockNumber, v.usdValue, v.vias.map((x) => [x.path.length, x.usd]), v.rpc.requests, agg().map((c) => c.block)],
+      [0x102n, 3_000_000n, [[2, 5_000_000n], [3, 3_000_000n], [3, 4_000_000n]], 4, [pin(0x101n), pin(0x101n), pin(0x102n), pin(0x102n)]]);
+  }
+  // a reorg on every attempt — mutants: more than 2 snapshots; a value, or a throw, instead of 'not measured'
+  {
+    const { blaze } = setup({ usd: reorgUsd, afterMulticall: (_k, at, c) => c.reorg(at.height) });
+    let v: Awaited<ReturnType<typeof blaze.usdValue>> | undefined;
+    try { v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A }); } catch { v = undefined; }
+    eq('usdValue: no block hash held through both aggregates in 2 snapshots → not measured, a result, not a throw',
+      v && [v.usdValue, v.usd, v.unitPrice, v.vias, v.spread, v.blockNumber, v.dollarDecimals, v.tokenDecimals, v.rpc.requests],
+      [null, 'not measured', 'not measured', [], null, null, null, null, 4]);
+  }
+  // node without EIP-1898 blockHash — mutant: fall back to a block-number tag
+  for (const token of [TKN, USDC]) {
+    const { blaze, agg } = setup({ usd: reorgTable, noBlockHash: true });
+    let v: Awaited<ReturnType<typeof blaze.usdValue>> | undefined;
+    try { v = await blaze.usdValue({ chain: 'base', token, amountIn: A }); } catch { v = undefined; }
+    eq(`usdValue: a node that takes no blockHash → not measured, never a read by number (${token === USDC ? 'dollar token' : 'token'})`,
+      v && [v.usdValue, v.usd, v.vias, v.blockNumber, v.rpc.requests, agg().length > 0 && agg().every((c) => typeof c.block === 'object')],
+      [null, 'not measured', [], null, 2, true]);
+  }
+  // header of another block — mutant: the block read in the aggregate not compared with the header number
+  {
+    const { blaze } = setup({ usd: reorgTable, headerSkew: 1n });
+    await throwsCode('usdValue: the header number is not the block its hash runs at → rpc_error',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A }), 'rpc_error');
+    await throwsCode('usdValue: the header for a pinned blockNumber names another block → rpc_error',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0x500n }), 'rpc_error');
+  }
+  // a whole header of another block for a pinned blockNumber — mutant: the header number not compared with req.blockNumber
+  {
+    const { blaze } = setup({ usd: reorgTable, headerOther: 1n });
+    await throwsCode('usdValue: the node answers the header of another block for a pinned blockNumber → rpc_error',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0x500n }), 'rpc_error');
+  }
+  // Property, blind seed: N blocks, random reorgs (at the height being read or just below), random
+  // prices, reverts and routes per block, on Base and on Arbitrum (ArbSys). A measured result comes
+  // from ONE block (every leg is that block's answer, every via was discovered on it), is never above
+  // a via, and stays within 2 snapshots (≤ 4 eth_calls); otherwise it is 'not measured', no block.
+  // Mutants: request 2 pinned by number; candidates kept across a restart; more than 2 snapshots;
+  // a value instead of 'not measured'; max instead of min.
+  {
+    const seed = process.env.USD_FUZZ_SEED ? BigInt(process.env.USD_FUZZ_SEED) : BigInt(`0x${randomBytes(8).toString('hex')}`);
+    console.log(`  · usdValue property seed ${seed} (USD_FUZZ_SEED=${seed} reproduces it)`);
+    let st = seed;
+    const rnd = (n: number) => { st = (st * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n); return Number((st >> 33n) % BigInt(n)); };
+    const h = (...xs: unknown[]) => BigInt(`0x${createHash('sha256').update(xs.map(String).join('|')).digest('hex').slice(0, 12)}`);
+    const routeOf = (at: MockBlock) => [1, 2, 3, 4].filter((i) => h(seed, 'route', at.height, at.gen, i) % 2n === 0n).map(X);
+    const RUNS = 150;
+    let bad = 0, measured = 0, notMeasured = 0, restarts = 0;
+    const firstBad: string[] = [];
+    for (let run = 0; run < RUNS; run++) {
+      const arb = rnd(2) === 1;
+      const chainId = arb ? 42161 : 8453;
+      const dollar = CHAINS[chainId].usdc;
+      const pReorg = rnd(4);   // a reorg after each aggregate with probability 0, 1/4, 2/4 or 3/4
+      const served: MockBlock[] = [];
+      const answer = (a: Address, b: Address, amt: bigint, at: MockBlock): Ans => {
+        if (h(seed, 'rev', at.height, at.gen, a, b) % 6n === 0n) return { revert: NO_ROUTE };
+        const netOut = h(seed, 'out', at.height, at.gen, a, b, amt) % 10n ** 9n + 1n;
+        if (key(a, b) !== key(TKN, dollar)) return { netOut };
+        const path = [TKN, ...routeOf(at), dollar];
+        return { netOut, hops: path.slice(0, -1).map((x, i) => hop(x, path[i + 1]!, i === 0 ? amt : 10n ** 18n + h(seed, 'ref', at.height, at.gen, x) % 10n ** 18n)) };
+      };
+      const { provider, calls } = mockProvider({
+        chainId, ...(arb ? { quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2' as Address } : {}), decimalsFor: { [dollar.toLowerCase()]: 6 }, usd: answer,
+        afterMulticall: (_k, at, c) => {
+          served.push(at);
+          c.advance(BigInt(rnd(3)));
+          if (rnd(4) < pReorg) c.reorg(rnd(3) === 0 ? at.height - BigInt(rnd(3)) : at.height);
+        },
+      });
+      const blaze = new BlazePhoenix({ rpc: { [arb ? 'arbitrum' : 'base']: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+      const amountIn = 1n + h(seed, 'amt', run) % 10n ** 24n;
+      let why = '';
+      try {
+        const v = await blaze.usdValue({ chain: arb ? 'arbitrum' : 'base', token: TKN, amountIn });
+        if (v.rpc.requests > 4) why = `requests ${v.rpc.requests}`;
+        if (calls.filter((c) => c.method === 'eth_getBlockByNumber').length > 1) restarts++;
+        if (v.vias.length === 0) {
+          notMeasured++;
+          if (v.usdValue !== null || v.blockNumber !== null || v.usd !== 'not measured') why ||= 'not measured with a value or a block';
+        } else {
+          measured++;
+          const last = served[served.length - 1]!;
+          if (v.blockNumber !== last.height) why ||= `block ${v.blockNumber} is not the block served last (${last.height})`;
+          for (const via of v.vias) for (const l of via.legs) {
+            const want = answer(l.tokenIn, l.tokenOut, l.amountIn, last);
+            const ok = 'revert' in want ? l.out === undefined : l.out === want.netOut;
+            if (!ok) why ||= `leg ${l.tokenIn}>${l.tokenOut} is not block ${last.height}/${last.gen}`;
+          }
+          const direct = answer(TKN, dollar, amountIn, last);
+          const wantX = 'revert' in direct ? [] : routeOf(last);
+          const gotX = v.vias.filter((x) => x.path.length === 3 && x.path[1] !== CHAINS[chainId].weth).map((x) => x.path[1]);
+          if (JSON.stringify(gotX) !== JSON.stringify(wantX)) why ||= `vias ${gotX} not the route of block ${last.height}/${last.gen} (${wantX})`;
+          const vals = v.vias.filter((x) => x.usd !== undefined).map((x) => x.usd!);
+          if (vals.some((x) => v.usdValue === null || v.usdValue > x)) why ||= `usdValue ${v.usdValue} above a via (${vals})`;
+          if ((vals.length === 0) !== (v.usdValue === null)) why ||= 'usdValue null with a measured via, or a value without one';
+        }
+      } catch (e) { why = `threw ${(e as Error).message}`; }
+      if (why) { bad++; if (firstBad.length < 3) firstBad.push(`run ${run}: ${why}`); }
+    }
+    console.log(`  · ${RUNS} runs: ${measured} measured, ${notMeasured} not measured, ${restarts} restarted`);
+    check(`usdValue property (seed ${seed}): one block per result, vias found on it, never above a via, ≤ 4 eth_calls`, bad === 0, firstBad.join('; '));
+    check('usdValue property reached a measured result, a not-measured result and a restart', measured > 0 && notMeasured > 0 && restarts > 0, `${measured}/${notMeasured}/${restarts}`);
   }
   // label per chain — mutant: label always USDC
   eq('usdFromVias: the label names the dollar token (USDG on Robinhood Chain)',
