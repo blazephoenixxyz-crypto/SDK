@@ -36,8 +36,14 @@ the live contracts they read today are unchanged.
 - `aggregateQuotedPrices` (the aggregation without RPC), `quotedUnitPriceUsd`,
   `formatQuotedUsd`, `wholeToBase` and `impactKindMeasured`.
 - `usdValue` returns `blockTimestamp`, read from the header whose hash pins the reads (`null`
-  when not measured or absent); `usdFromVias` takes it as an optional reading. Each `UsdLeg`
-  carries the Quoter's `impactBps` and `route` (optional, additive).
+  when not measured or absent), and `blockHash`, the hash that pinned them (`null` when not
+  measured); `usdFromVias` takes both as optional readings. Each `UsdLeg` carries the Quoter's
+  `impactBps` and `route` (optional, additive).
+- `usdValue({ blockHash })` pins every read to the block with that hash: the header is read by
+  hash, so a block a reorg replaced throws `rpc_error` instead of reading the new block at the
+  same height; a malformed hash throws `bad_request`. `crossChainAverage` quotes the second size
+  under the first quote's block hash and returns each chain's `blockHash`; a second size from
+  another block, or the same height under another hash, is not measured.
 
 - `usdValue({ chain, token, amountIn })`: the USD value of an amount, read on the Quoter only
   (no oracle, no price API) in one `Multicall3.aggregate3` eth_call, two when the direct route

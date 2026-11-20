@@ -208,10 +208,11 @@ The USD value of an amount, read on the Quoter only: no oracle, no price API. Th
 - **"not measured", never 0.** A via whose call reverts, whose route has 0 hops or whose `netOut` is 0
   measured nothing. If no via measured, `usdValue` is `null` and `usd` is `'not measured'`.
 - **One block, pinned by hash.** The client reads the block header (`eth_getBlockByNumber`, `latest`
-  or your `blockNumber`) and runs every eth_call of one `usdValue` at that block's hash (EIP-1898,
-  `requireCanonical: true`), never at a block number: after a reorg a number names another block.
-  The block read inside the call must equal the header's number, and a pinned `blockNumber` must
-  get its own header; otherwise it is an `rpc_error`.
+  or your `blockNumber`; `eth_getBlockByHash` for your `blockHash`) and runs every eth_call of
+  one `usdValue` at that block's hash (EIP-1898, `requireCanonical: true`), never at a block
+  number: after a reorg a number names another block. The result's `blockHash` is that hash. The
+  block read inside the call must equal the header's number, and a pinned `blockNumber` or
+  `blockHash` must get its own header; otherwise it is an `rpc_error`.
 - **"not measured" is a result, not an error.** If the node loses the block between the calls
   (a reorg), discovery restarts on a new block, at most `USD_SNAPSHOT_TRIES` (2) snapshots. If the
   block is lost every time, or the node takes no `blockHash` block parameter, `usdValue` returns
@@ -293,13 +294,15 @@ block; nothing here is an executed price.
   external wrapper): the Quoter then uses a constant default impact for it, the number is kept,
   and `impactNote` names those venues. When the chain is not measured, or the token is the
   dollar token itself (nothing is quoted), `impactBps`, `impactBasis` and `impactSource` are
-  `null` and `impactNote` says why; never 0. A second size quoted in another block than the
-  first is not measured either: no price, no impact.
+  `null` and `impactNote` says why; never 0. The second size is quoted under the first quote's
+  block hash (`usdValue({ blockHash })`), not its height: after a reorg that replaced that block,
+  or from another block, the second size is not measured either: no price, no impact.
 - `aggregateQuotedPrices` is the same aggregation without RPC; `quotedUnitPriceUsd` is the price
   of one reading; `wholeToBase` converts whole tokens to base units; `impactKindMeasured(kind)`
   is the Quoter's kind table. `usdValue` now also returns `blockTimestamp`, from the header whose
-  hash pinned the reads, and each `UsdLeg` carries the Quoter's `impactBps` and `route`
-  (additive fields).
+  hash pinned the reads, and `blockHash`, that hash; `usdValue({ blockHash })` reads the block
+  with that hash or throws `rpc_error`. Each `UsdLeg` carries the Quoter's `impactBps` and
+  `route` (additive fields).
 
 ## Errors
 

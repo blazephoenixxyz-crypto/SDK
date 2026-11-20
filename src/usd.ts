@@ -13,7 +13,7 @@
 import { formatUnits, parseAbi } from 'viem';
 import { FEE_BPS } from './constants.js';
 import { BlazeError } from './errors.js';
-import type { Address, ChainRef, Route, TokenRef } from './types.js';
+import type { Address, ChainRef, Hex, Route, TokenRef } from './types.js';
 
 /** Multicall3, same address on every EVM chain it is deployed to. */
 export const MULTICALL3: Address = '0xcA11bde05977b3631167028862bE2a173976CA11';
@@ -50,6 +50,10 @@ export interface UsdValueRequest {
   version?: string;
   /** Pin every read to this block (default: latest, then pinned to the block it answered). */
   blockNumber?: bigint;
+  /** Pin every read to the block with this hash (EIP-1898): the header is read by hash, so a
+   *  reorg that replaced that block throws rpc_error instead of reading the new block at its
+   *  height. With blockNumber too, the two must name the same block. */
+  blockHash?: Hex;
 }
 
 /** One venue of a route hop as the Quoter answered it: its address, its kind, its share of the hop's input and its expected output. */
@@ -100,6 +104,8 @@ export interface UsdValue {
   /** The block every read ran in (pinned by its hash); null when no block hash held through the
    *  reads in USD_SNAPSHOT_TRIES snapshots (reorgs, or a node without EIP-1898 blockHash). */
   blockNumber: bigint | null;
+  /** The hash that pinned every read (EIP-1898); null when not measured. */
+  blockHash: Hex | null;
   /** The timestamp (seconds) in the header of that block, the same header whose hash pinned the
    *  reads; null when not measured or when the header carried no timestamp. */
   blockTimestamp: bigint | null;
@@ -142,6 +148,8 @@ export interface UsdReadings {
   amountIn: bigint;
   tokenDecimals: number | null;
   blockNumber: bigint;
+  /** The hash that pinned the reads; omitted or null when not given. */
+  blockHash?: Hex | null;
   /** The pinned header's timestamp in seconds; omitted or null when the header carried none. */
   blockTimestamp?: bigint | null;
   vias: UsdViaReading[];
@@ -208,7 +216,7 @@ export function usdNotMeasured(r: { chainId: number; version: string; dollarToke
   const symbol = symbolOf(r.chainId);
   return {
     chainId: r.chainId, version: r.version, label: `USD (via ${symbol})`, dollarToken: r.dollarToken, dollarDecimals: null,
-    token: r.token, amountIn: r.amountIn, tokenDecimals: null, blockNumber: null, blockTimestamp: null, usdValue: null, usd: 'not measured',
+    token: r.token, amountIn: r.amountIn, tokenDecimals: null, blockNumber: null, blockHash: null, blockTimestamp: null, usdValue: null, usd: 'not measured',
     unitPrice: 'not measured', vias: [], spread: null, rpc: { requests: r.rpcRequests }, basis: basisOf(symbol),
   };
 }
@@ -239,6 +247,7 @@ export function usdFromVias(r: UsdReadings): UsdValue {
     amountIn: r.amountIn,
     tokenDecimals: r.tokenDecimals,
     blockNumber: r.blockNumber,
+    blockHash: r.blockHash ?? null,
     blockTimestamp: r.blockTimestamp ?? null,
     usdValue,
     usd: usdValue === null ? 'not measured' : formatUnits(usdValue, r.dollarDecimals),

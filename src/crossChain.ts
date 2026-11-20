@@ -20,7 +20,7 @@ import { BlazePhoenix } from './client.js';
 import { CHAINS, resolveChain } from './constants.js';
 import { BlazeError } from './errors.js';
 import { scrubUrls, type RpcSource } from './rpc.js';
-import type { Address, ChainRef, TokenRef } from './types.js';
+import type { Address, ChainRef, Hex, TokenRef } from './types.js';
 import type { UsdValue, UsdVia } from './usd.js';
 
 /** Scale of every price: USD per whole token × 1e18. */
@@ -329,6 +329,8 @@ export interface QuotedChainPrice {
   dollarDecimals: number | null;
   tokenDecimals: number | null;
   blockNumber: bigint | null;
+  /** The hash of that block, which pinned every read (null when not measured). */
+  blockHash: Hex | null;
   blockTimestamp: bigint | null;
   vias: UsdVia[];
   /** The via the price comes from, its legs, and every via with its status (null when the
@@ -406,7 +408,7 @@ export async function crossChainPrice(req: CrossChainPriceRequest): Promise<Cros
 /**
  * crossChainPrice plus a quoted cross-chain average: medianPriceUsd (the main value),
  * depthWeightedPriceUsd (depth measured by quoting the second size in the same block as the
- * first on each chain), min, max, spreadBps, skewSeconds, and the included and excluded chains
+ * first on each chain, pinned by the first block's hash), min, max, spreadBps, skewSeconds, and the included and excluded chains
  * with the reason. maxSkewSeconds excludes chains whose block is older than the newest by more
  * than that. No measured chain → 'not_measured', no number.
  */
@@ -420,9 +422,9 @@ export async function crossChainAverage(req: CrossChainAverageRequest): Promise<
     const { first, depthAmountIn } = await measureEntry(e);
     if (first.status !== 'measured' || depthAmountIn === null) return { ...first, depth: null };
     // the second size in the block of the first: the two prices differ by size only
-    const depth = await measureChain(e, depthAmountIn, first.blockNumber!);
-    if (depth.status === 'measured' && depth.blockNumber !== first.blockNumber) {
-      return { ...first, depth: { ...depth, status: 'not_measured' as const, priceUsd: null, ...noImpact('the price is not measured'), reason: `quoted in block ${depth.blockNumber}, not in block ${first.blockNumber}` } };
+    const depth = await measureChain(e, depthAmountIn, first.blockNumber!, first.blockHash!);
+    if (depth.status === 'measured' && (depth.blockNumber !== first.blockNumber || depth.blockHash !== first.blockHash)) {
+      return { ...first, depth: { ...depth, status: 'not_measured' as const, priceUsd: null, ...noImpact('the price is not measured'), reason: `quoted in block ${depth.blockNumber} ${depth.blockHash}, not in block ${first.blockNumber} ${first.blockHash}` } };
     }
     return { ...first, depth };
   }));
@@ -522,17 +524,17 @@ async function measureEntry(e: PlannedEntry): Promise<{ first: QuotedChainPrice;
   return { first, depthAmountIn: d };
 }
 
-async function measureChain(e: PlannedEntry, amountIn: bigint, blockNumber?: bigint): Promise<QuotedChainPrice> {
+async function measureChain(e: PlannedEntry, amountIn: bigint, blockNumber?: bigint, blockHash?: Hex): Promise<QuotedChainPrice> {
   let v: UsdValue;
   try {
-    v = await e.client.usdValue({ chain: e.chainId, token: e.token, amountIn, ...(e.version ? { version: e.version } : {}), ...(blockNumber !== undefined ? { blockNumber } : {}) });
+    v = await e.client.usdValue({ chain: e.chainId, token: e.token, amountIn, ...(e.version ? { version: e.version } : {}), ...(blockNumber !== undefined ? { blockNumber } : {}), ...(blockHash !== undefined ? { blockHash } : {}) });
   } catch (err) {
     if (isCallerError(err)) throw err;
     return failed(e, amountIn, `${err instanceof BlazeError ? `${err.code}: ` : ''}${(err as Error)?.message ?? String(err)}`);
   }
   const base: Omit<QuotedChainPrice, keyof Impact> = {
     chainId: e.chainId, status: 'not_measured', token: v.token, amountIn, priceUsd: null, usdValue: v.usdValue,
-    dollarDecimals: v.dollarDecimals, tokenDecimals: v.tokenDecimals, blockNumber: v.blockNumber, blockTimestamp: v.blockTimestamp, vias: v.vias,
+    dollarDecimals: v.dollarDecimals, tokenDecimals: v.tokenDecimals, blockNumber: v.blockNumber, blockHash: v.blockHash, blockTimestamp: v.blockTimestamp, vias: v.vias,
     derivation: derivationOf(e, v),
   };
   const no = (reason: string): QuotedChainPrice => ({ ...base, reason, ...noImpact('the price is not measured') });
@@ -598,7 +600,7 @@ function derivationOf(e: PlannedEntry, v: UsdValue): QuotedDerivation {
 function failed(e: PlannedEntry, amountIn: bigint | null, why: string, amount?: string): QuotedChainPrice {
   return {
     chainId: e.chainId, status: 'not_measured', reason: scrubUrls(why), token: null, amountIn, ...(amount !== undefined ? { amount } : {}),
-    priceUsd: null, usdValue: null, dollarDecimals: null, tokenDecimals: null, blockNumber: null, blockTimestamp: null, vias: [],
+    priceUsd: null, usdValue: null, dollarDecimals: null, tokenDecimals: null, blockNumber: null, blockHash: null, blockTimestamp: null, vias: [],
     derivation: null, ...noImpact('the price is not measured'),
   };
 }

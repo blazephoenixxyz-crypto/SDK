@@ -335,6 +335,7 @@ function mockProvider(o: MockOpts = {}) {
   const gens = new Map<bigint, number>();
   const hashOf = (h: bigint, g = gens.get(h) ?? 0): Hex => `0x${h.toString(16).padStart(48, '0')}${g.toString(16).padStart(16, '0')}`;
   const chain: MockChain = { reorg: (h) => { gens.set(h, (gens.get(h) ?? 0) + 1); }, advance: (n) => { head += n; }, head: () => head, hashOf: (h) => hashOf(h) };
+  const header = (h: bigint) => ({ number: `0x${(h + (o.headerSkew ?? 0n)).toString(16)}`, hash: hashOf(h), parentHash: hashOf(h - 1n), ...((t) => (t === null ? {} : { timestamp: `0x${t.toString(16)}` }))(o.timestampOf ? o.timestampOf(h) : 0x65000000n) });
   let multicalls = 0;
   let cur: MockBlock = { height: head, gen: 0 };
   const provider = {
@@ -354,7 +355,13 @@ function mockProvider(o: MockOpts = {}) {
         calls.push({ method, block: p[0] });
         const tag = p[0] as string;
         const h = (tag.startsWith('0x') ? BigInt(tag) : (head += 1n)) + (o.headerOther ?? 0n);
-        return { number: `0x${(h + (o.headerSkew ?? 0n)).toString(16)}`, hash: hashOf(h), parentHash: hashOf(h - 1n), ...((t) => (t === null ? {} : { timestamp: `0x${t.toString(16)}` }))(o.timestampOf ? o.timestampOf(h) : 0x65000000n) };
+        return header(h);
+      }
+      if (method === 'eth_getBlockByHash') {
+        // EIP-1898 lookup by hash: a hash a reorg replaced is unknown to the node (null)
+        calls.push({ method, block: p[0] });
+        const bh = p[0] as string, h = BigInt(`0x${bh.slice(2, 50)}`);
+        return bh === hashOf(h) ? header(h + (o.headerOther ?? 0n)) : null;
       }
       if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
       const { to, data, from: caller } = p[0] as { to: string; data: Hex; from?: string };
@@ -1274,6 +1281,35 @@ console.log('client · usdValue');
     await throwsCode('usdValue: the node answers the header of another block for a pinned blockNumber → rpc_error',
       () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0x500n }), 'rpc_error');
   }
+  // pin by block hash (EIP-1898) — mutants: blockHash not returned; the request's blockHash ignored
+  // (the block read by number); a header of another hash accepted; a malformed hash sent to the node
+  {
+    const m = mockProvider({ decimalsFor: usdc6, usd: reorgTable });
+    const blaze = new BlazePhoenix({ rpc: { base: m.provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    const aggs = () => m.calls.filter((c) => c.fn === 'multicall.aggregate3');
+    const headers = () => m.calls.filter((c) => c.method.startsWith('eth_getBlockBy'));
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A });
+    eq('usdValue: blockHash is the hash that pinned every read', [v.blockHash, aggs().every((c) => (c.block as { blockHash: string }).blockHash === v.blockHash)], [m.chain.hashOf(v.blockNumber!), true]);
+    const before = aggs().length;
+    const w = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: v.blockHash! });
+    eq('usdValue: a blockHash pin reads that block by its hash: same number, hash and value',
+      [w.blockNumber, w.blockHash, w.usdValue, headers().at(-1), aggs().slice(before).every((c) => (c.block as { blockHash: string }).blockHash === v.blockHash)],
+      [v.blockNumber, v.blockHash, v.usdValue, { method: 'eth_getBlockByHash', block: v.blockHash }, true]);
+    const lower = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0xabcn });
+    const upper = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: `0x${lower.blockHash!.slice(2).toUpperCase()}` });
+    eq('usdValue: a blockHash in upper-case hex names the same block', [/[a-f]/.test(lower.blockHash!), upper.blockNumber, upper.blockHash], [true, 0xabcn, lower.blockHash]);
+    m.chain.reorg(v.blockNumber!);
+    const n = aggs().length;
+    await throwsCode('usdValue: a blockHash a reorg replaced → rpc_error, never the new block at that height',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: v.blockHash! }), 'rpc_error');
+    eq('usdValue: a blockHash a reorg replaced reads nothing', aggs().length, n);
+    await throwsCode('usdValue: a blockHash that is not 32 bytes of hex → bad_request',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: '0x1234' as Hex }), 'bad_request');
+    const other = mockProvider({ decimalsFor: usdc6, usd: reorgTable, headerOther: 1n });
+    const b2 = new BlazePhoenix({ rpc: { base: other.provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    await throwsCode('usdValue: the node answers the header of another hash for a pinned blockHash → rpc_error',
+      () => b2.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: other.chain.hashOf(0x500n) }), 'rpc_error');
+  }
   // Property, blind seed: N blocks, random reorgs (at the height being read or just below), random
   // prices, reverts and routes per block, on Base and on Arbitrum (ArbSys). A measured result comes
   // from ONE block (every leg is that block's answer, every via was discovered on it), is never above
@@ -1838,8 +1874,10 @@ console.log('crossChain · crossChainPrice / crossChainAverage (RPC)');
   {
     const r = await crossChainAverage({ client, chains: entries.map((e) => ({ ...e, depthAmountIn: A2 })) });
     // mutant Y5: the second size not pinned to the first size's block (read at latest)
-    const headers = op.calls.filter((c) => c.method === 'eth_getBlockByNumber').slice(-2).map((c) => c.block);
-    eq('crossChainAverage: the second size is quoted in the block of the first', [headers[0], headers[1] === `0x${r.chains[1]!.blockNumber!.toString(16)}`], ['latest', true]);
+    // mutant H2: pinned by the first block's number, not its hash
+    const headers = op.calls.filter((c) => c.method.startsWith('eth_getBlockBy')).slice(-2).map((c) => [c.method, c.block]);
+    eq('crossChainAverage: the second size is quoted in the block of the first, named by its hash', [headers[0], headers[1], r.chains[1]!.blockHash === op.chain.hashOf(r.chains[1]!.blockNumber!)],
+      [['eth_getBlockByNumber', 'latest'], ['eth_getBlockByHash', r.chains[1]!.blockHash], true]);
     const points = r.chains.map((c) => ({
       chainId: c.chainId, priceUsd: c.priceUsd, blockTimestamp: c.status === 'measured' ? c.blockTimestamp : null,
       ...(c.reason ? { reason: c.reason } : {}),
@@ -1957,8 +1995,36 @@ console.log('crossChain · crossChainPrice / crossChainAverage (RPC)');
       const r = await crossChainAverage({ client: drift, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
       const c = r.chains[0]!, dp = c.depth!;
       eq('crossChainAverage: the second size quoted in another block → not_measured with its reason; no price, impact, basis or source',
-        [c.status, c.impactBps, dp.status, dp.priceUsd, dp.impactBps, dp.impactBasis, dp.impactSource, typeof dp.impactNote, /^quoted in block \d+, not in block \d+$/.test(dp.reason ?? ''), r.depthWeightedPriceUsd],
+        [c.status, c.impactBps, dp.status, dp.priceUsd, dp.impactBps, dp.impactBasis, dp.impactSource, typeof dp.impactNote, /^quoted in block \d+ 0x[0-9a-f]{64}, not in block \d+ 0x[0-9a-f]{64}$/.test(dp.reason ?? ''), r.depthWeightedPriceUsd],
         ['measured', 37n, 'not_measured', null, null, null, null, 'string', true, null]);
+    }
+    {
+      // a reorg replaces the first quote's block between the two quotes: same height, another block
+      // mutant: the second size pinned by height only (it reads the new block and is measured)
+      const m = routed([6]);
+      const real = new BlazePhoenix({ rpc: { base: m.provider }, ...opts });
+      const reorged = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); if (q.blockNumber === undefined && q.blockHash === undefined) m.chain.reorg(v.blockNumber!); return v; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: reorged, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!, dp = c.depth!;
+      eq('crossChainAverage: the first quote\'s block replaced at the same height before the second → depth not_measured, no depth-weighted price',
+        [c.status, c.blockHash === m.chain.hashOf(c.blockNumber!), dp.status, dp.priceUsd, dp.impactBps, dp.reason?.includes(`no block ${c.blockHash} (a reorg replaced it`), r.depthWeightedPriceUsd],
+        ['measured', false, 'not_measured', null, null, true, null]);
+    }
+    {
+      // a client whose second size answers the same height under another hash
+      // mutant H1: the two quotes compared by height only
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const other = `0x${'ee'.repeat(32)}` as Hex;
+      const fork = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); return q.blockHash === undefined ? v : { ...v, blockHash: other }; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: fork, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!, dp = c.depth!;
+      eq('crossChainAverage: the second size at the same height under another block hash → not_measured with both hashes',
+        [c.status, dp.status, dp.priceUsd, dp.impactBps, dp.blockNumber === c.blockNumber, dp.reason === `quoted in block ${c.blockNumber} ${other}, not in block ${c.blockNumber} ${c.blockHash}`, r.depthWeightedPriceUsd],
+        ['measured', 'not_measured', null, null, true, true, null]);
     }
     const d = m.derivation!;
     // mutant: hops, pools or bridge tokens dropped from the derivation
