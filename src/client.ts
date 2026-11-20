@@ -15,7 +15,7 @@
 // =============================================================================
 
 import {
-  decodeFunctionResult, getAddress, parseEventLogs, type PublicClient, type WalletClient,
+  decodeFunctionResult, encodeFunctionData, getAddress, parseEventLogs, type PublicClient, type WalletClient,
 } from 'viem';
 import {
   ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI, STAKING_SOLVENCY_ABI,
@@ -29,13 +29,17 @@ import {
   CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
 } from './constants.js';
 import { featuresOf, isZero, type VersionFeatures, type VersionSelector } from './deployments.js';
-import { BlazeError, decodeBlazeError, isTransportError, untrustedText } from './errors.js';
+import { BlazeError, decodeBlazeError, decodeRevertData, isTransportError, untrustedText } from './errors.js';
 import { MAX_UINT256, buildApproveTx, toBaseUnits } from './erc20.js';
 import {
   Registry, type ContractOverrides, type RegistryOptions, type ResolvedDeployment,
 } from './registry.js';
 import { memGet, memPut, singleflight } from './resilience.js';
 import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions, scrubUrls } from './rpc.js';
+import {
+  ARBSYS, ARBSYS_ABI, ARBSYS_BLOCK_CHAINS, MULTICALL3, MULTICALL3_ABI, USD_SNAPSHOT_TRIES, planUsdVias, usdFromVias, usdNotMeasured,
+  type UsdLegReading, type UsdValue, type UsdValueRequest, type UsdViaReading,
+} from './usd.js';
 import type {
   Address, ApprovalStep, ExactQuote, Fill, Hex, Preview, Quote, QuoteRequest, Route,
   SimulationResult, SolvencyReport, SwapPlan, SwapRequest, TokenInfo, TxRequest,
@@ -125,6 +129,11 @@ export interface DeploymentReport {
   contracts: ResolvedDeployment['contracts'];
   checks: DeploymentCheck[];
 }
+
+/** EIP-1898 block parameter: one block by hash, refused if no longer canonical. */
+type BlockHashPin = { blockHash: Hex; requireCanonical: true };
+/** The node no longer serves the pinned block hash (a reorg), or takes no blockHash at all. */
+class SnapshotGone extends Error {}
 
 export class BlazePhoenix {
   readonly registry: Registry;
@@ -235,7 +244,7 @@ export class BlazePhoenix {
 
   // ── tokens & amounts ───────────────────────────────────────────────────────
 
-  private resolveToken(chainId: SupportedChainId, ref: string, side: 'tokenIn' | 'tokenOut'): ResolvedToken {
+  private resolveToken(chainId: SupportedChainId, ref: string, side: 'tokenIn' | 'tokenOut' | 'token'): ResolvedToken {
     const s = (ref ?? '').trim();
     if (HEX_ADDR.test(s)) {
       const a = getAddress(s);
@@ -391,6 +400,139 @@ export class BlazePhoenix {
     });
     if (cacheable) memPut(key, q);
     return q;
+  }
+
+  /** One Multicall3.aggregate3 eth_call (every inner call allowFailure), at one block named by
+   *  its hash (EIP-1898, requireCanonical). Any error of that eth_call is SnapshotGone: the node
+   *  lost the block to a reorg, or takes no blockHash; never retried by number. */
+  private async aggregate3(ctx: Ctx, calls: { target: Address; callData: Hex }[], at: BlockHashPin) {
+    const data = encodeFunctionData({
+      abi: MULTICALL3_ABI, functionName: 'aggregate3', args: [calls.map((c) => ({ ...c, allowFailure: true }))],
+    });
+    let raw: unknown;
+    try {
+      raw = await ctx.client.request({ method: 'eth_call', params: [{ to: MULTICALL3, data }, at] } as never);
+    } catch {
+      throw new SnapshotGone();
+    }
+    try {
+      return decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'aggregate3', data: (typeof raw === 'string' ? raw : '0x') as Hex });
+    } catch (e) {
+      this.wrapReadError(e, 'usdValue');
+    }
+  }
+
+  /** The block every aggregate of one usdValue reads, from the caller's node: its number and an
+   *  EIP-1898 pin by hash. A pin by number reads whatever block holds that height after a reorg,
+   *  and the height check still passes. */
+  private async usdSnapshot(ctx: Ctx, blockNumber?: bigint): Promise<{ n: bigint; at: BlockHashPin }> {
+    let h: unknown;
+    try {
+      h = await ctx.client.request({ method: 'eth_getBlockByNumber', params: [blockNumber !== undefined ? `0x${blockNumber.toString(16)}` : 'latest', false] } as never);
+    } catch (e) {
+      this.wrapReadError(e, 'usdValue');
+    }
+    const { number: num, hash } = (h && typeof h === 'object' ? h : {}) as { number?: unknown; hash?: unknown };
+    if (typeof num !== 'string' || !/^0x[0-9a-fA-F]+$/.test(num) || typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash))
+      throw new BlazeError('rpc_error', 'usdValue: your RPC returned no block header to pin the measurement to');
+    const n = BigInt(num);
+    if (blockNumber !== undefined && n !== blockNumber) throw new BlazeError('rpc_error', `usdValue: your RPC answered the header of block ${n} for block ${blockNumber}`);
+    return { n, at: { blockHash: hash.toLowerCase() as Hex, requireCanonical: true } };
+  }
+
+  /** USD value of `amountIn` of `token`, measured on the Quoter only (no oracle, no API):
+   *  the minimum over the direct quote to the dollar token, the quote via WETH and via each
+   *  token the direct route touches. The dollar token (USDC, USDG on Robinhood Chain) is taken
+   *  as 1 USD. One eth_call (Multicall3), two when the direct route discovers more vias; both
+   *  pinned to the same block HASH (EIP-1898). A reorg that drops that block restarts discovery
+   *  on a new block, at most USD_SNAPSHOT_TRIES snapshots; a node that loses the block every time,
+   *  or takes no blockHash, gives 'not measured' (no value, no block), never a read by number.
+   *  A via that measured nothing is 'not measured', never 0. */
+  async usdValue(req: UsdValueRequest): Promise<UsdValue> {
+    const ctx = await this.ctx(req);
+    const t = this.resolveToken(ctx.chainId, req.token, 'token');
+    const amountIn = await this.amountOf(ctx.client, ctx.chainId, { tokenIn: req.token, tokenOut: req.token, amountIn: req.amountIn }, t);
+    const { usdc: dollar, weth } = CHAINS[ctx.chainId];
+    const token = t.address;
+    const identity = token.toLowerCase() === dollar.toLowerCase();
+    // The block the RPC tags count: block.number is the L1 block on Arbitrum chains.
+    const arbBlock = ARBSYS_BLOCK_CHAINS.includes(ctx.chainId);
+    const enc = {
+      block: arbBlock
+        ? { target: ARBSYS, callData: encodeFunctionData({ abi: ARBSYS_ABI, functionName: 'arbBlockNumber' }) }
+        : { target: MULTICALL3, callData: encodeFunctionData({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber' }) },
+      decimals: (a: Address) => ({ target: a, callData: encodeFunctionData({ abi: ERC20_ABI, functionName: 'decimals' }) }),
+      preview: (l: UsdLegReading) => ({
+        target: ctx.dep.contracts.quoter,
+        callData: encodeFunctionData({ abi: QUOTER_ABI, functionName: 'previewPlan', args: [l.tokenIn, l.tokenOut, l.amountIn] }),
+      }),
+    };
+    type R = { success: boolean; returnData: Hex };
+    const blockOf = (r: R, n: bigint): bigint => {
+      const what = arbBlock ? 'ArbSys.arbBlockNumber' : 'Multicall3.getBlockNumber';
+      if (!r.success) throw new BlazeError('rpc_error', `usdValue: ${what} failed`);
+      let b: bigint;
+      try {
+        b = arbBlock
+          ? decodeFunctionResult({ abi: ARBSYS_ABI, functionName: 'arbBlockNumber', data: r.returnData })
+          : decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', data: r.returnData });
+      } catch {
+        throw new BlazeError('rpc_error', `usdValue: ${what} answered no block number`);
+      }
+      if (b !== n) throw new BlazeError('rpc_error', `usdValue: ${what} answered block ${b} under the hash of block ${n}`);
+      return b;
+    };
+    const decimalsOf = (r: R): number | null => {
+      if (!r.success) return null;
+      try { return Number(decodeFunctionResult({ abi: ERC20_ABI, functionName: 'decimals', data: r.returnData })); } catch { return null; }
+    };
+    const leg = (l: UsdLegReading, r: R): { reading: UsdLegReading; route?: Route } => {
+      if (!r.success) {
+        const d = decodeRevertData(r.returnData);
+        return { reading: { ...l, error: d ? `${d.name}(${d.code ?? ''}) — ${d.reason}` : 'the Quoter reverted' } };
+      }
+      try {
+        const [pv] = decodeFunctionResult({ abi: QUOTER_ABI, functionName: 'previewPlan', data: r.returnData }) as unknown as [Preview, Route, boolean];
+        return { reading: { ...l, netOut: pv.netOut, hops: pv.route.hops.length }, route: pv.route };
+      } catch {
+        return { reading: { ...l, error: 'the Quoter answer did not decode' } };
+      }
+    };
+    let sent = 0;   // every aggregate eth_call sent, a failed one included
+    const read = async (vias: UsdViaReading[], at: BlockHashPin, n: bigint) => {
+      const legs = identity ? [] : vias.flatMap((v) => v.legs);
+      sent++;
+      const res = await this.aggregate3(ctx, [enc.block, enc.decimals(token), enc.decimals(dollar), ...legs.map(enc.preview)], at);
+      let i = 3;
+      let route: Route | undefined; // the direct quote's route: the first leg read
+      const out = vias.map((v) => ({
+        path: v.path,
+        legs: v.legs.map((l) => { const x = leg(l, res[i]!); if (i++ === 3) route = x.route; return x.reading; }),
+      }));
+      const dollarDecimals = decimalsOf(res[2]!);
+      if (dollarDecimals === null) throw new BlazeError('rpc_error', `usdValue: decimals() of the dollar token ${dollar} failed on your RPC`);
+      return { blockNumber: blockOf(res[0]!, n), tokenDecimals: decimalsOf(res[1]!), dollarDecimals, vias: out, route };
+    };
+    const first = planUsdVias(token, amountIn, dollar, weth);
+    for (let attempt = 0; attempt < USD_SNAPSHOT_TRIES; attempt++) {
+      const { n, at } = await this.usdSnapshot(ctx, req.blockNumber);
+      let got;
+      try {
+        got = await read(identity ? [] : first, at, n);
+        // candidates come from this snapshot only, never from a lost one
+        const all = got.route ? planUsdVias(token, amountIn, dollar, weth, got.route) : first;
+        if (!identity && all.length > first.length) got = await read(all, at, n);
+      } catch (e) {
+        if (e instanceof SnapshotGone) continue;
+        throw e;
+      }
+      return usdFromVias({
+        chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, dollarDecimals: got.dollarDecimals,
+        token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, vias: got.vias, rpcRequests: sent,
+      });
+    }
+    // no block hash held through every aggregate: not measured, never a value
+    return usdNotMeasured({ chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, token, amountIn, rpcRequests: sent });
   }
 
   /** Execution-grade re-quote (previewPlanExact): every concentrated leg is

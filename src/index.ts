@@ -48,6 +48,10 @@ export {
   toBaseUnits, fromBaseUnits, MAX_UINT256,
   type ApproveOptions, type Permit2Transfer,
 } from './erc20.js';
+export {
+  usdFromVias, usdNotMeasured, MULTICALL3, USD_MAX_VIAS, USD_SNAPSHOT_TRIES,
+  type UsdValue, type UsdValueRequest, type UsdVia, type UsdLeg, type UsdSpread, type UsdReadings, type UsdViaReading, type UsdLegReading,
+} from './usd.js';
 export { toJSON, type Jsonify } from './json.js';
 export { resilientFetch, singleflight, type RetryOptions } from './resilience.js';
 export type {
