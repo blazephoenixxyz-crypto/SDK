@@ -1322,22 +1322,23 @@ console.log('client · usdValue');
     let st = seed;
     const rnd = (n: number) => { st = (st * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n); return Number((st >> 33n) % BigInt(n)); };
     const h = (...xs: unknown[]) => BigInt(`0x${createHash('sha256').update(xs.map(String).join('|')).digest('hex').slice(0, 12)}`);
-    const routeOf = (at: MockBlock) => [1, 2, 3, 4].filter((i) => h(seed, 'route', at.height, at.gen, i) % 2n === 0n).map(X);
+    let run = 0;   // every answer hashes the run too: on the seed alone all runs saw the same chain
+    const routeOf = (at: MockBlock) => [1, 2, 3, 4].filter((i) => h(seed, run, 'route', at.height, at.gen, i) % 2n === 0n).map(X);
     const RUNS = 150;
     let bad = 0, measured = 0, notMeasured = 0, restarts = 0;
     const firstBad: string[] = [];
-    for (let run = 0; run < RUNS; run++) {
+    for (run = 0; run < RUNS; run++) {
       const arb = rnd(2) === 1;
       const chainId = arb ? 42161 : 8453;
       const dollar = CHAINS[chainId].usdc;
       const pReorg = rnd(4);   // a reorg after each aggregate with probability 0, 1/4, 2/4 or 3/4
       const served: MockBlock[] = [];
       const answer = (a: Address, b: Address, amt: bigint, at: MockBlock): Ans => {
-        if (h(seed, 'rev', at.height, at.gen, a, b) % 6n === 0n) return { revert: NO_ROUTE };
-        const netOut = h(seed, 'out', at.height, at.gen, a, b, amt) % 10n ** 9n + 1n;
+        if (h(seed, run, 'rev', at.height, at.gen, a, b) % 6n === 0n) return { revert: NO_ROUTE };
+        const netOut = h(seed, run, 'out', at.height, at.gen, a, b, amt) % 10n ** 9n + 1n;
         if (key(a, b) !== key(TKN, dollar)) return { netOut };
         const path = [TKN, ...routeOf(at), dollar];
-        return { netOut, hops: path.slice(0, -1).map((x, i) => hop(x, path[i + 1]!, i === 0 ? amt : 10n ** 18n + h(seed, 'ref', at.height, at.gen, x) % 10n ** 18n)) };
+        return { netOut, hops: path.slice(0, -1).map((x, i) => hop(x, path[i + 1]!, i === 0 ? amt : 10n ** 18n + h(seed, run, 'ref', at.height, at.gen, x) % 10n ** 18n)) };
       };
       const { provider, calls } = mockProvider({
         chainId, ...(arb ? { quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2' as Address } : {}), decimalsFor: { [dollar.toLowerCase()]: 6 }, usd: answer,
@@ -1348,7 +1349,7 @@ console.log('client · usdValue');
         },
       });
       const blaze = new BlazePhoenix({ rpc: { [arb ? 'arbitrum' : 'base']: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
-      const amountIn = 1n + h(seed, 'amt', run) % 10n ** 24n;
+      const amountIn = 1n + h(seed, run, 'amt', run) % 10n ** 24n;
       let why = '';
       try {
         const v = await blaze.usdValue({ chain: arb ? 'arbitrum' : 'base', token: TKN, amountIn });
