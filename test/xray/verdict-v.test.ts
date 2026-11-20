@@ -149,3 +149,13 @@ test('[V8] no round-trip guard: roundTripLossBps is null at every scale and an E
   assert.equal(V(r).status, 'MEASURED');
   for (const k of [1n, 10n ** 6n, 10n ** 18n]) assert.equal(measure(clean(k)).roundTripLossBps, null, `k=${k}`);
 });
+
+// M4: the wallet-transfer guard stays even though a null transferTaxBps also stops the verdict (V1): a Measure
+// with the transfer not run is NOT_MEASURED by that guard, whatever tax value it carries. [M4]
+test('[M4] wallet transfer not run is NOT_MEASURED by its own guard, even with a transfer tax present', () => {
+  for (const ok of [null, undefined] as const) {
+    const m = { ...measure(clean()), transferOk: ok as any, transferTaxBps: 0n };
+    const v = instrumentVerdict(m, { maxTaxBps: 100 });
+    assert.equal(v.status, 'NOT_MEASURED'); assert.equal(v.why, 'wallet transfer not measured');
+  }
+});
