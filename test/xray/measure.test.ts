@@ -12,10 +12,19 @@ const dir = new URL('./golden/', import.meta.url);
 const goldens = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
 const load = (f: string) => JSON.parse(fs.readFileSync(new URL(f, dir), 'utf8'));
 const fn = (PROBE_ABI as readonly any[]).find((x) => x.name === 'probe');
-// Intentional divergences from measure.mjs (V-X1 defects): new output field sellOut (defect 3).
-const NEW_FIELDS = ['sellOut'];
+// Intentional divergences from measure.mjs (V-X1 defects): new output field sellOut (defect 3); the later-sale
+// fields of tier A (V2).
+const NEW_FIELDS = ['sellOut', 'sellLaterOk', 'sellLaterTaxSwapBps', 'sellLaterOut', 'laterRequired'];
 // synth-fot5-fullsell: sellTaxSwapBps 5015 was ignored by instrumentVerdict (false clean, V-X1 C2-f).
 const INTENTIONAL: Record<string, Record<string, string>> = { 'synth-fot5-fullsell.json': { '1000': 'CONDEMN' } };
+// Measure fields that differ on purpose from the JS producer (2026-11-20). V8: no round-trip guard, so
+// roundTripLossBps is null and the 'partial sell' note is gone. V7: a pool transfer that ran is read (ok true)
+// whatever its sent amount; its tax stays null here because the flags hide the receiver delta.
+const INTENTIONAL_MEASURE: Record<string, Record<string, unknown>> = {
+  'synth-fot5-fullsell.json': { roundTripLossBps: null },
+  'synth-v4-sell-unmeasured.json': { notes: [], poolTransferOk: true },
+  'v2-halfsell-direct-56632746.json': { notes: [] },
+};
 
 test('probe ABI is frozen: selector and full fragment hash', () => {
   assert.equal(toFunctionSelector(fn), '0x61153369');
@@ -31,7 +40,7 @@ for (const f of goldens) {
     assert.equal(encodeFunctionResult({ abi: PROBE_ABI as any, functionName: 'probe', result: r }), g.returnData);
     const m = S(measure(r));
     for (const k of NEW_FIELDS) delete m[k];
-    assert.deepEqual(m, g.measure);
+    assert.deepEqual(m, { ...g.measure, ...INTENTIONAL_MEASURE[f] });
     for (const [t, v] of Object.entries(g.verdict)) {
       const want = (INTENTIONAL[f]?.[t] ?? v) as string;
       assert.equal(instrumentVerdict(measure(r), { maxTaxBps: Number(t) }).v, want, `t=${t}`);

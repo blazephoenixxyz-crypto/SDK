@@ -49,10 +49,10 @@ test('(i) C2-f exact vector: sellTaxSwapBps 9900 with a clean pool transfer COND
   const v = instrumentVerdict(m, { maxTaxBps: 100 });
   assert.equal(v.v, 'CONDEMN'); assert.equal(v.why, 'sellTaxSwapBps 9900 >= 100');
 });
-test('(i) C2-f with a full sell (roundTripLossBps 9999): CONDEMN by the swap-side tax', () => {
+test('(i) C2-f with a full sell (ETH-only loss 9999 bps): CONDEMN by the swap-side tax', () => {
   const r = fullSell(1n, 9_999n); r.sellPoolReceived = 99n;
   const m = measure(r);
-  assert.equal(m.roundTripLossBps, 9_999n); assert.equal(m.sellTaxSwapBps, 9_901n); assert.equal(m.sellTaxBps, 0n);
+  assert.equal(m.roundTripLossBps, null); assert.equal(m.sellTaxSwapBps, 9_901n); assert.equal(m.sellTaxBps, 0n);
   assert.equal(instrumentVerdict(m, { maxTaxBps: 100 }).v, 'CONDEMN');
 });
 
@@ -82,16 +82,15 @@ for (const [name, bits] of [['POOL_SELL', UM.POOL_SELL], ['BAL_X', UM.BAL_X], ['
   });
 }
 
-// (iii) Round-trip loss at or above the threshold: never MEASURED. It includes pool fees and price impact, so it
-// does not condemn alone: WARN. One below the threshold stays MEASURED. [M10, M11]
+// (iii) No round-trip guard (decision 2026-11-20, V8): ETH out vs ETH in mixes pool fees and price impact with the
+// tax, so an ETH-only loss with clean tax readings is MEASURED and roundTripLossBps is null at every size. [V8]
 for (const k of SCALES) {
-  for (const [loss, want] of [[99n, 'MEASURED'], [100n, 'WARN'], [101n, 'WARN'], [9_999n, 'WARN']] as const) {
-    test(`(iii) full sell at scale ${k}, roundTripLossBps ${loss} vs maxTaxBps 100: ${want}`, () => {
+  for (const loss of [99n, 100n, 101n, 9_999n] as const) {
+    test(`(iii) full sell at scale ${k}, ETH-only loss ${loss} bps vs maxTaxBps 100: MEASURED, roundTripLossBps null`, () => {
       const m = measure(fullSell(k, loss));
-      assert.equal(m.roundTripLossBps, loss); assert.equal(m.sellTaxSwapBps, 0n); assert.equal(m.buyTaxBps, 0n);
+      assert.equal(m.roundTripLossBps, null); assert.equal(m.sellTaxSwapBps, 0n); assert.equal(m.buyTaxBps, 0n);
       const v = instrumentVerdict(m, { maxTaxBps: 100 });
-      assert.equal(v.v, want); assert.equal(v.status, want);
-      if (want === 'WARN') assert.match(v.why, new RegExp(`roundTripLossBps ${loss} >= 100`));
+      assert.equal(v.v, 'MEASURED'); assert.equal(v.status, 'MEASURED');
     });
   }
 }

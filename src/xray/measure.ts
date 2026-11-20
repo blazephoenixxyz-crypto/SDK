@@ -30,7 +30,8 @@ export type Measure = {
   buyOk: boolean | null; sellOk: boolean | null; transferOk: boolean | null; poolTransferOk: boolean | null;
   buyTaxBps: bigint | null; buyTaxGrossBps: bigint | null; sellTaxBps: bigint | null; sellTaxSwapBps: bigint | null;
   transferTaxBps: bigint | null; roundTripLossBps: bigint | null; directSellOk: boolean | null;
-  directSellTaxBps: bigint | null; sellOut: bigint | null; notes: string[];
+  directSellTaxBps: bigint | null; sellOut: bigint | null; sellLaterOk: boolean | null; sellLaterTaxSwapBps: bigint | null;
+  sellLaterOut: bigint | null; laterRequired: boolean; notes: string[];
 };
 
 /** ceil(n / d) for signed n, d > 0. */
@@ -47,15 +48,17 @@ export function lossBps(got: unknown, sent: unknown): bigint | null {
   return ceilDiv(10_000n * (s - g), s);
 }
 
-export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1 }: { feeBps?: bigint } = {}): Measure {
+export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: { feeBps?: bigint; tier?: string | null } = {}): Measure {
   const out: Measure = { buyOk: null, sellOk: null, transferOk: null, poolTransferOk: null, buyTaxBps: null, buyTaxGrossBps: null,
     sellTaxBps: null, sellTaxSwapBps: null, transferTaxBps: null, roundTripLossBps: null, directSellOk: null, directSellTaxBps: null,
-    sellOut: null, notes: [] };
+    sellOut: null, sellLaterOk: null, sellLaterTaxSwapBps: null, sellLaterOut: null, laterRequired: false, notes: [] };
   // Absent is not a value (IC3): without the flags no delta can be trusted, so nothing is measured.
   if (r === null || typeof r !== 'object' || !Object.hasOwn(r, 'unmeasured') || r.unmeasured === undefined || r.unmeasured === null) {
     out.notes.push('unmeasured field absent');
     return out;
   }
+  // Tier A sells the remainder at B+N (class b2); the scan's tier decides, the Result's field only as fallback.
+  out.laterRequired = (tier ?? r.tier) === 'A';
   const um = B(r.unmeasured);
   const has = (bit: bigint) => (um & bit) !== 0n;
   Object.assign(out, measureDirectSell(r));
@@ -77,24 +80,29 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1 }: { feeB
     if (out.sellOk === null) out.notes.push('sell not run');
     if (out.sellOk) {
       const S = B(r.sellIn), Q = B(r.sellPoolReceived);
-      out.sellOut = B(r.sellOut);
-      if (!has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxSwapBps = lossBps(Q, S);
-      if (B(r.sellTokenSelfDelta) < 0n) out.notes.push('token contract balance fell during the sell (swapback): swap-side tax not identifiable');
-      if (!has(UM.WETH) && !has(UM.BAL_X) && D > 0n && S > 0n) {
-        // Measured only when the whole delivered amount was sold (S == D): the AMM is convex, so the
-        // ETH "spent on a share" (buyIn * S / D) is a model, not a measurement (I-measure, I3).
-        if (S === D) out.roundTripLossBps = lossBps(r.sellOut, r.buyIn);
-        else out.notes.push('partial sell: round-trip loss not measured');
-      }
+      // sellOut needs both the WETH and the seller's token balance (V6): unreadable is null, never 0 wei.
+      if (!has(UM.WETH) && !has(UM.BAL_X)) out.sellOut = B(r.sellOut);
+      // The pool delta is the seller's tax only when the token's own balance was read and did not fall (V3).
+      const sd = r.sellTokenSelfDelta;
+      if (has(UM.SELF) || sd === undefined || sd === null) out.notes.push('token contract balance not measured: swap-side tax not identifiable');
+      else if (B(sd) < 0n) out.notes.push('token contract balance fell during the sell (swapback): swap-side tax not identifiable');
+      else if (!has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxSwapBps = lossBps(Q, S);
+      // No round-trip guard (V8): the ETH out vs ETH in mixes the pool fees and price impact with the tax, and
+      // the sell tax is read directly (sellTaxBps, sellTaxSwapBps, the later sale), so roundTripLossBps stays null.
     }
   } else out.notes.push('no sell route at this block');
-  if (B(r.transferSent) > 0n || (r.transfer?.revertData?.length ?? 0) > 2) {
-    out.transferOk = ran(r.transfer);
-    if (out.transferOk && !has(UM.BAL_Y)) out.transferTaxBps = lossBps(r.transferReceived, r.transferSent);
-  }
-  if (B(r.poolTransferSent) > 0n || (r.poolTransfer?.revertData?.length ?? 0) > 2) {
-    out.poolTransferOk = ran(r.poolTransfer);
-    if (out.poolTransferOk && !has(UM.POOL_SELL)) out.sellTaxBps = lossBps(r.poolTransferReceived, r.poolTransferSent);
+  // A transfer that ran is read whatever its revert data or sent amount (V7); not run is null.
+  out.transferOk = ran(r.transfer);
+  if (out.transferOk && !has(UM.BAL_Y) && !has(UM.BAL_X)) out.transferTaxBps = lossBps(r.transferReceived ?? 0n, r.transferSent ?? 0n);
+  out.poolTransferOk = ran(r.poolTransfer);
+  if (out.poolTransferOk && !has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxBps = lossBps(r.poolTransferReceived ?? 0n, r.poolTransferSent ?? 0n);
+  if (out.laterRequired && r.sellLater) {
+    out.sellLaterOk = ran(r.sellLater);
+    if (out.sellLaterOk) {
+      const has3 = (k: string) => r[k] !== undefined && r[k] !== null;
+      if (has3('sellLaterOut')) out.sellLaterOut = B(r.sellLaterOut);
+      if (has3('sellLaterIn') && has3('sellLaterPoolReceived')) out.sellLaterTaxSwapBps = lossBps(r.sellLaterPoolReceived, r.sellLaterIn);
+    }
   }
   return out;
 }
@@ -120,7 +128,11 @@ export function measureDirectSell(d: any): { directSellOk: boolean | null; direc
 }
 
 export type InstrumentVerdict = { v: Verdict; status: Status; why: string; text?: string };
-const TAXES = ['buyTaxBps', 'sellTaxBps', 'sellTaxSwapBps', 'transferTaxBps', 'directSellTaxBps'] as const;
+const TAXES = ['buyTaxBps', 'sellTaxBps', 'sellTaxSwapBps', 'transferTaxBps', 'directSellTaxBps', 'sellLaterTaxSwapBps'] as const;
+/** maxTaxBps is the owner's number: an integer in [1, 10000] bps, refused otherwise (V4). */
+export function validMaxTaxBps(x: unknown): boolean {
+  return (typeof x === 'bigint' || (typeof x === 'number' && Number.isSafeInteger(x))) && BigInt(x) >= 1n && BigInt(x) <= 10_000n;
+}
 
 /**
  * The own-simulation instrument's output in the verdict lattice: CONDEMN < WARN < MEASURED.
@@ -128,6 +140,7 @@ const TAXES = ['buyTaxBps', 'sellTaxBps', 'sellTaxSwapBps', 'transferTaxBps', 'd
  */
 export function instrumentVerdict(m: Measure, { maxTaxBps }: { maxTaxBps: number | bigint }): InstrumentVerdict {
   if (maxTaxBps === undefined) throw new TypeError('maxTaxBps is an owner decision: pass it');
+  if (!validMaxTaxBps(maxTaxBps)) throw new RangeError('maxTaxBps must be an integer in [1, 10000]');
   const nm = (why: string): InstrumentVerdict => ({ v: 'WARN', status: 'NOT_MEASURED', why });
   // A Router-sale revert condemns unless a direct sale to the pair executed in the same state: then it
   // is a limit of our route (WARN 'route'), never MEASURED, and every check below still applies.
@@ -136,6 +149,8 @@ export function instrumentVerdict(m: Measure, { maxTaxBps }: { maxTaxBps: number
     return { v: 'CONDEMN', status: 'CONDEMN', why: 'sell reverted', text: m.directSellOk === false ? 'direct pool sale reverted or delivered nothing' : 'direct pool sale not measured' };
   }
   if (m.sellOk === true && m.sellOut === 0n) return { v: 'CONDEMN', status: 'CONDEMN', why: 'sell delivered 0 wei' };
+  if (m.sellLaterOk === false) return { v: 'CONDEMN', status: 'CONDEMN', why: 'later sell reverted' };
+  if (m.sellLaterOk === true && m.sellLaterOut === 0n) return { v: 'CONDEMN', status: 'CONDEMN', why: 'later sell delivered 0 wei' };
   if (m.poolTransferOk === false) return { v: 'CONDEMN', status: 'CONDEMN', why: 'transfer to the pool reverted' };
   for (const k of TAXES) {
     const x = m[k];
@@ -146,12 +161,9 @@ export function instrumentVerdict(m: Measure, { maxTaxBps }: { maxTaxBps: number
   if (m.sellOk !== true) return nm('sell not measured');
   if (m.transferOk === false) return { v: 'WARN', status: 'WARN', why: 'wallet transfer reverted' };
   if (m.transferOk !== true) return nm('wallet transfer not measured');
-  if (m.buyTaxBps === null || m.sellTaxBps === null || m.sellTaxSwapBps === null) return nm('a tax was not measured');
-  // The round trip includes pool fees and price impact, so it does not condemn alone; at or above the
-  // threshold it is never MEASURED (lesson (a), V-X1 C2-f).
-  if (m.roundTripLossBps !== null && m.roundTripLossBps >= BigInt(maxTaxBps)) {
-    return { v: 'WARN', status: 'WARN', why: `roundTripLossBps ${m.roundTripLossBps} >= ${maxTaxBps}` };
-  }
+  if (m.sellOut === null) return nm('sell output not measured');
+  if (m.buyTaxBps === null || m.sellTaxBps === null || m.sellTaxSwapBps === null || m.transferTaxBps === null) return nm('a tax was not measured');
+  if (m.laterRequired && (m.sellLaterOk !== true || m.sellLaterOut === null || m.sellLaterTaxSwapBps === null)) return nm('later sell not measured');
   return { v: 'MEASURED', status: 'MEASURED', why: 'buy, sell and transfers measured' };
 }
 

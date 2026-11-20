@@ -383,7 +383,9 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
     r.sellLater = step(m.sellLater);
     const a = snapVals(m, 'lateA'), b = snapVals(m, 'lateB');
     if (r.sellLater.ok && a.x !== null && b.x !== null && a.w !== null && b.w !== null) {
-      r.sellLaterIn = a.x > b.x ? a.x - b.x : 0n; r.sellLaterOut = b.w > a.w ? b.w - a.w : 0n; r.sellLaterPoolReceived = b.pools - a.pools;
+      r.sellLaterIn = a.x > b.x ? a.x - b.x : 0n; r.sellLaterOut = b.w > a.w ? b.w - a.w : 0n;
+      // The later pool delta is measured only when every pool balance was read (as UM.POOL_SELL for the sale at B).
+      if (a.okP && b.okP && !pv4(known.routeLater, 0)) r.sellLaterPoolReceived = b.pools - a.pools;
     }
   }
   if (tier === 'A' && m.quoteLater) { const ql = quoteOf(m.quoteLater); r.quoteLater = { ok: !!(ql && ql.canExecute) }; }

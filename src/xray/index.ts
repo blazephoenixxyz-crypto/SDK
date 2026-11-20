@@ -5,6 +5,7 @@ import { startProgram, stepProgram, inputHash, XrayError, type Io, type Rpc, typ
 import { pinBlock, makeCtx, XRAY_DEPLOYMENTS } from './ctx.js';
 import { scan, type Gen } from './scan.js';
 import { buildReport, type XrayReport } from './report.js';
+import { validMaxTaxBps } from './measure.js';
 
 export type XrayInput = { chainId: number; token: string; amountIn: bigint; maxTaxBps: number; N?: number; X?: string; Y?: string };
 export type Transport = (batch: Rpc[]) => Promise<unknown[]>;
@@ -24,6 +25,7 @@ function* xrayProgram(input: XrayInput, io: Io): Gen<XrayReport> {
   if (typeof input.token !== 'string' || !ADDR.test(input.token)) throw new XrayError('bad_input', 'token');
   if (typeof input.amountIn !== 'bigint' || input.amountIn <= 0n) throw new XrayError('bad_input', 'amountIn');
   if (input.maxTaxBps === undefined) throw new XrayError('bad_input', 'maxTaxBps is an owner decision: pass it');
+  if (!validMaxTaxBps(input.maxTaxBps)) throw new XrayError('bad_input', 'maxTaxBps must be an integer in [1, 10000]');
   const N = input.N ?? 100;
   const blk = yield* pinBlock(input.chainId, getAddress(input.token));
   io.pin({ number: BigInt(blk.number), hash: blk.hash });

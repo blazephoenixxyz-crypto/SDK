@@ -1,4 +1,5 @@
-// Fresh-verifier false cleans (V-verif, 2026-11-20): every test asserts the expected verdict and was red at e10e351.
+// Fresh-verifier false cleans (V-verif, 2026-11-20): every test asserts the expected verdict and was red at e10e351,
+// except [V8], which pins the decision to drop the round-trip guard (green there on a half sale, red on its mutant).
 // Rule: no path reaches MEASURED unless the sell tax was read; in doubt the result is NOT_MEASURED.
 // Each test names the mutant that turns it red ([Vxx], xray-ship/mut.mjs).
 import test from 'node:test';
@@ -137,14 +138,14 @@ test('[V7] pool transfer reverted with empty data CONDEMNs; wallet transfer reve
   assert.equal(V(w).why, 'wallet transfer reverted');
 });
 
-// V8: the real tiers sell half (ctx.ts sellFracBps 5000). The loss on the sold share at the average buy price is
-// measured; with a concave pool output it is a lower bound of the full round trip, so the guard is live. [V8]
-test('[V8] partial sale: roundTripLossBps is the loss on the sold share, exact, and the guard fires', () => {
-  const r = clean(); // 4990 * 9972 vs 10000 * 4986 -> 20 bps
-  assert.equal(measure(r).roundTripLossBps, 20n);
+// V8 (decision 2026-11-20): no round-trip guard. ETH out vs ETH in mixes the pool fees and price impact with the
+// tax, and the sell tax is read directly (V2, V3), so roundTripLossBps is null and never moves the verdict. [V8]
+test('[V8] no round-trip guard: roundTripLossBps is null at every scale and an ETH-only loss leaves the verdict', () => {
+  const r = clean();
+  assert.equal(measure(r).roundTripLossBps, null);
   assert.equal(V(r).status, 'MEASURED');
-  r.sellOut = 1n; // hidden loss in WETH only (token deltas clean)
-  assert.equal(measure(r).roundTripLossBps, 9_998n);
-  assert.equal(V(r).status, 'WARN'); assert.match(V(r).why, /^roundTripLossBps 9998 >= 100$/);
-  for (const k of [1n, 10n ** 6n, 10n ** 18n]) assert.equal(measure(clean(k)).roundTripLossBps, 20n, `k=${k}`);
+  r.sellOut = 1n; // loss in WETH only, token deltas clean: not a tax reading
+  assert.equal(measure(r).roundTripLossBps, null);
+  assert.equal(V(r).status, 'MEASURED');
+  for (const k of [1n, 10n ** 6n, 10n ** 18n]) assert.equal(measure(clean(k)).roundTripLossBps, null, `k=${k}`);
 });
