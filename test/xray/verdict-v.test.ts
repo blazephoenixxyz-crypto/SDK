@@ -79,6 +79,15 @@ test('[V2] tier A: later sale with the pool receiving 50 of 4986 CONDEMNs on the
   assert.equal(measure(r).sellLaterTaxSwapBps, 9_900n);
   assert.equal(V(r).v, 'CONDEMN');
 });
+// The later swap-side tax is compared with the owner's threshold on its own, not only through the floor or the
+// economic reading (a Measure handed to the verdict need not carry them). [V2x]
+test('[V2x] tier A: sellLaterTaxSwapBps at maxTaxBps CONDEMNs on its own reading; 1 bps below does not', () => {
+  const base = measure(cleanA());
+  assert.equal(instrumentVerdict(base, { maxTaxBps: 100 }).status, 'MEASURED');
+  const at = instrumentVerdict({ ...base, sellLaterTaxSwapBps: 100n }, { maxTaxBps: 100 });
+  assert.equal(at.v, 'CONDEMN'); assert.equal(at.why, 'sellLaterTaxSwapBps 100 >= 100');
+  assert.equal(instrumentVerdict({ ...base, sellLaterTaxSwapBps: 99n }, { maxTaxBps: 100 }).status, 'MEASURED');
+});
 test('[V2] tier A: later sale delivering 0 wei CONDEMNs', () => {
   const r = cleanA(); r.sellLaterOut = 0n;
   assert.equal(V(r).why, 'later sell delivered 0 wei');
@@ -152,6 +161,33 @@ test('[V6] sellOut with WETH or BAL_X unmeasured is NOT_MEASURED, not CONDEMN', 
     assert.equal(measure(r).sellOut, null);
     assert.equal(V(r).status, 'NOT_MEASURED');
   }
+});
+// The 0-wei guard is the only CONDEMN for a sale delivering nothing when no sell quote was read: the economic
+// reading is then null, so without the guard the result falls to NOT_MEASURED. [M3]
+test('[M3] sale delivering 0 wei CONDEMNs on its own guard, with or without a sell quote; 1 wei does not hit it', () => {
+  for (const q of [true, false]) {
+    const r = clean(); r.sellOut = 0n; if (!q) delete r.sellQuotedNet;
+    assert.equal(measure(r).sellEconBps, q ? 10_000n : null);
+    for (const max of [100, 10_000]) {
+      const v = V(r, max);
+      assert.equal(v.v, 'CONDEMN'); assert.equal(v.why, 'sell delivered 0 wei');
+    }
+    assert.equal(rep(r, 'A').verdict, 'CONDEMN');
+  }
+  const r = clean(); r.sellOut = 1n; delete r.sellQuotedNet;
+  assert.equal(V(r).status, 'NOT_MEASURED'); assert.equal(V(r).why, 'economic tax not measured');
+});
+// The verdict checks sellOut itself, never trusting that a null sellOut left the economic reading null. [V6v]
+test('[V6v] sellOut null is NOT_MEASURED with its own reason, even in a Measure whose other readings are clean', () => {
+  for (const u of [UM.WETH, UM.BAL_X]) {
+    const r = clean(); r.unmeasured = u;
+    assert.equal(V(r).why, 'sell output not measured');
+  }
+  const m = { ...measure(clean()), sellOut: null };
+  assert.equal(m.sellEconBps, 0n);
+  const v = instrumentVerdict(m, { maxTaxBps: 100 });
+  assert.equal(v.status, 'NOT_MEASURED'); assert.equal(v.why, 'sell output not measured');
+  assert.equal(instrumentVerdict(measure(clean()), { maxTaxBps: 100 }).status, 'MEASURED');
 });
 
 // V7: a transfer that ran and reverted with empty data is a revert, whatever the sent amount. [V7]
