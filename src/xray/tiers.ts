@@ -400,8 +400,10 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
   if (tier === 'A' && m.sellLater) {
     r.sellLater = step(m.sellLater);
     const a = snapVals(m, 'lateA'), b = snapVals(m, 'lateB');
-    if (r.sellLater.ok && a.x !== null && b.x !== null && a.w !== null && b.w !== null) {
-      r.sellLaterIn = a.x > b.x ? a.x - b.x : 0n; r.sellLaterOut = b.w > a.w ? b.w - a.w : 0n;
+    if (r.sellLater.ok && a.x !== null && b.x !== null) {
+      // WETH gates only the output: the own-balance floor needs the debit and SELF, not WETH (as at B).
+      r.sellLaterIn = a.x > b.x ? a.x - b.x : 0n;
+      if (a.w !== null && b.w !== null) r.sellLaterOut = b.w > a.w ? b.w - a.w : 0n;
       // The later pool delta is measured only when every pool balance was read (as UM.POOL_SELL for the sale at B).
       if (a.okP && b.okP && !pv4(known.routeLater, 0)) r.sellLaterPoolReceived = b.pools - a.pools;
       // The token's own balance across the later sale (X1); unread stays absent (not measured), never 0.
