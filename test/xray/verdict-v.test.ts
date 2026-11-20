@@ -65,7 +65,7 @@ test('[V1] wallet transfer with an unmeasured receiver delta is NOT_MEASURED', (
   assert.equal(out.instruments.find((i) => i.name === 'transfer')!.status, 'NOT_MEASURED');
 });
 
-// V2: tier A runs a later sale at B+N (class b2: sells blocked after N blocks); the verdict reads it. [V2, V2t, V2r]
+// V2: tier A runs a later sale at B+N (class b2: sells disabled after N blocks); the verdict reads it. [V2, V2t, V2r]
 test('[V2] tier A: later sale reverted CONDEMNs', () => {
   const r = cleanA(); r.sellLater = { ok: false, gas: 60_000n, revertData: '0x08c379a0' };
   delete r.sellLaterIn; delete r.sellLaterOut; delete r.sellLaterPoolReceived;

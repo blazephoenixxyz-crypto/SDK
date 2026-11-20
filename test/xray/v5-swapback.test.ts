@@ -120,9 +120,9 @@ const has = (notes: string[], re: RegExp) => notes.some((n) => re.test(n));
 const sellLoss = (r: any) => { const res = r.instruments.find((i: any) => i.name === 'sim').values, q = r.instruments.find((i: any) => i.name === 'quoter').values;
   return { sellOut: res.sellOut, sellQuotedNet: q.sellQuotedNet }; };
 
-// Controls: the same node with no swapback CONDEMNs a 20% sell tax (the node itself is sound).
+// Controls: the same node with no swapback CONDEMNs a 2000 bps sell tax (the node itself is sound).
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-ctl] ${rung}: 20% sell tax, fee kept by the token (no swapback): CONDEMN`, async () => {
+  test(`[V5-ctl] ${rung}: 2000 bps sell tax, fee kept by the token (no swapback): CONDEMN`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 2000n, mode: 'prop', kBps: 0n }, probe).transport, IN);
     assert.equal(r.rung, rung); assert.equal(r.verdict, 'CONDEMN', show(r));
   });
@@ -130,9 +130,9 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
 
 // V5-1: fee to the token itself, then swapBack(balanceOf(this)) in the same transfer, contract balance 0 before
 // (drained by the previous sale). Self delta = +tax - tax = 0 (selfStill passes), pair delta = (v - tax) + tax = v:
-// every sell reading is 0 bps while the seller loses 20%. Only the seller's WETH shows it (sellOut = 80% of the quote).
+// every sell reading is 0 bps while the seller loses 2000 bps. Only the seller's WETH shows it (sellOut = 80% of the quote).
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-1] ${rung}: 20% sell tax liquidated to the pair in the same transfer (self delta 0) is never MEASURED`, async () => {
+  test(`[V5-1] ${rung}: 2000 bps sell tax liquidated to the pair in the same transfer (self delta 0) is never MEASURED`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 2000n, mode: 'all' }, probe).transport, IN);
     const w = why(r);
     console.log(`V5-1 ${rung}: ${show(r)} ${JSON.stringify(sellLoss(r), (_, v) => (typeof v === 'bigint' ? String(v) : v))} why=${w.why} notes=${w.notes.join(' | ')}`);
@@ -144,10 +144,10 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
   });
 }
 
-// V5-2 = question (a): 20% fee to an EXTERNAL wallet that, in the same transfer, sells 15% of the moved amount into
+// V5-2 = question (a): 2000 bps fee to an EXTERNAL wallet that, in the same transfer, sells 15% of the moved amount into
 // the pair (partial swapback). Token contract delta 0, pair delta v - 0.20v + 0.15v = 0.95v: every reading 500 bps.
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-2] ${rung}: 20% fee to an external wallet with a 15% swapback in the same transfer is never MEASURED`, async () => {
+  test(`[V5-2] ${rung}: 2000 bps fee to an external wallet with a 15% swapback in the same transfer is never MEASURED`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 2000n, holder: EXT, mode: 'prop', kBps: 1500n, start: 10n ** 24n }, probe).transport, IN);
     const w = why(r);
     console.log(`V5-2 ${rung}: ${show(r)} why=${w.why} notes=${w.notes.join(' | ')}`);
@@ -158,12 +158,12 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
   });
 }
 
-// V5-3 = question (b) at tier A/C: the router sale is fee-exempt (honest 0), a plain transfer to the pair pays 20% to the
+// V5-3 = question (b) at tier A/C: the router sale is fee-exempt (honest 0), a plain transfer to the pair pays 2000 bps to the
 // token, which sells 15% of the amount back in the same transfer. The token's own balance MOVES (+5% of v) during the
 // transfer to the pair, but toResult never reads it there (tiers.ts:372-381) and measure.ts:108 has no selfStill:
 // sellTaxBps reads 500.
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-3] ${rung}: 20% tax on a transfer to the pair with a self swapback (self balance moves) is never MEASURED`, async () => {
+  test(`[V5-3] ${rung}: 2000 bps tax on a transfer to the pair with a self swapback (self balance moves) is never MEASURED`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 2000n, mode: 'prop', kBps: 1500n, routerExempt: true }, probe).transport, IN);
     const w = why(r);
     console.log(`V5-3 ${rung}: ${show(r)} why=${w.why} notes=${w.notes.join(' | ')}`);
@@ -175,12 +175,12 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
   });
 }
 
-// V5-3-EXT (owner decision 3, red-first PoC of the pair-anchor guard): as V5-3, but the 20% goes to an EXTERNAL wallet
+// V5-3-EXT (owner decision 3, red-first PoC of the pair-anchor guard): as V5-3, but the 2000 bps goes to an EXTERNAL wallet
 // that sells 15% of the moved amount into the pair in the same plain transfer. The token's own balance does not move
 // (selfStill passes), the pair receives 0.95v (500 bps < maxTaxBps) and the router sale is exempt (clean): only the
 // pair's anchor (WETH) balance, which the swapback pays out, shows the move. Red at 5d with anchorStill -> true: MEASURED.
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-3-EXT] ${rung}: 20% tax to an external wallet that sells into the pair in the plain transfer is never MEASURED`, async () => {
+  test(`[V5-3-EXT] ${rung}: 2000 bps tax to an external wallet that sells into the pair in the plain transfer is never MEASURED`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 2000n, holder: EXT, mode: 'prop', kBps: 1500n, routerExempt: true, start: 10n ** 24n }, probe).transport, IN);
     const w = why(r);
     console.log(`V5-3-EXT ${rung}: ${show(r)} why=${w.why} notes=${w.notes.join(' | ')}`);
@@ -194,10 +194,10 @@ for (const [rung, probe] of Object.entries(RUNGS)) {
   });
 }
 
-// V5-4: 20% buy tax to an external wallet that donates 20% of the pair's output back to the pair in the same buy.
+// V5-4: 2000 bps buy tax to an external wallet that donates 2000 bps of the pair's output back to the pair in the same buy.
 // buyPoolSent = 0.8 out, buyDelivered = 0.8 out * (1 - fee): buyTaxBps reads 0. buyA:s/buyB:s are read, never used.
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[V5-4] ${rung}: 20% buy tax hidden by a same-transfer donation to the pair is never MEASURED`, async () => {
+  test(`[V5-4] ${rung}: 2000 bps buy tax hidden by a same-transfer donation to the pair is never MEASURED`, async () => {
     const r: any = await runXray(sbNode({ sellTaxBps: 0n, buyTaxBps: 2000n, buyDonateBps: 2000n, holder: EXT, mode: 'prop', kBps: 0n, start: 10n ** 24n }, probe).transport, IN);
     const w = why(r);
     console.log(`V5-4 ${rung}: ${show(r)} why=${w.why} notes=${w.notes.join(' | ')}`);
@@ -225,7 +225,7 @@ test('[V5-B1] tier B: sale with fee liquidated in the same transfer (sellOut 80%
 // Owner decision 1 (20/11): tier B reads no token-contract balance around the transfer to the pair, so the tax there is
 // a declared limit (sellTaxBps null, TIER_LIMITS.B), not a requirement: with the rest clean, B is MEASURED. This oracle
 // replaces the 5453eed PoC's 'never MEASURED' (which needed a pair-transfer reading tier B cannot make).
-test('[V5-B3] tier B: transfer to the pair taxed 20% with a 15% self swapback is not measured there (TIER_LIMITS.B), the rest MEASURED', () => {
+test('[V5-B3] tier B: transfer to the pair taxed 2000 bps with a 15% self swapback is not measured there (TIER_LIMITS.B), the rest MEASURED', () => {
   const m = measure(resB({ poolTransferReceived: (10n ** 16n * 95n) / 100n }), { tier: 'B' });
   const v = instrumentVerdict(m, { maxTaxBps: 1000 });
   console.log(`V5-B3: ${v.status} (${v.why}) sell=${m.sellTaxBps} notes=${m.notes.join(' | ')}`);

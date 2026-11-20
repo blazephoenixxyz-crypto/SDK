@@ -15,11 +15,11 @@ const RUNGS: Record<string, any> = { 'A:d4': {}, C: { 'A:d4': down, 'A:d2': down
 const show = (r: any) => { const s = r.instruments.find((i: any) => i.name === 'sim'); const v = s.values;
   return `${r.verdict} sim=${s.status}(${s.reason}) buy=${v.buyTaxBps} sell=${v.sellTaxBps} swap=${v.sellTaxSwapBps} tr=${v.transferTaxBps} later=${v.sellLaterTaxSwapBps}`; };
 
-// X2: uniswap-v2 tax template, 20% sell-only tax to the token contract, swapback of a fixed `cap` before the tax is
+// X2: uniswap-v2 tax template, 2000 bps sell-only tax to the token contract, swapback of a fixed `cap` before the tax is
 // taken. Tax (9.97e16) > cap (7e16): the token's own balance RISES during the sale (sd = +2.97e16 >= 0), so the V3
 // gate (measure.ts:88, sd < 0) does not fire, and the pool delta carries the cap: swap-side tax reads ~596 bps.
 for (const [rung, probe] of Object.entries(RUNGS)) {
-  test(`[X2] ${rung}: 20% sell tax with a partial swapback (token balance rises) is never MEASURED at maxTaxBps 1000`, async () => {
+  test(`[X2] ${rung}: 2000 bps sell tax with a partial swapback (token balance rises) is never MEASURED at maxTaxBps 1000`, async () => {
     const r: any = await runXray(fakeNode({ probe, swapback: { taxBps: 2000n, cap: 7n * 10n ** 16n, start: 10n ** 18n } }).transport, IN);
     assert.equal(r.rung, rung);
     console.log(`X2 ${rung}: ${show(r)}`);
@@ -72,8 +72,8 @@ test('[X1] toResult: the later sale with the token balance falling (swapback) ca
   assert.notEqual(v.status, 'MEASURED', `later sale: ${v.why}`);
 });
 
-// Controls: the V3 gate at B still fires when the swapback exceeds the tax (sd < 0); no swapback, 20% tax CONDEMNs.
-test('[X0] controls: swapback larger than the tax at B is NOT MEASURED; plain 20% sell tax CONDEMNs', async () => {
+// Controls: the V3 gate at B still fires when the swapback exceeds the tax (sd < 0); no swapback, 2000 bps tax CONDEMNs.
+test('[X0] controls: swapback larger than the tax at B is NOT MEASURED; plain 2000 bps sell tax CONDEMNs', async () => {
   const a: any = await runXray(fakeNode({ swapback: { taxBps: 2000n, cap: 2n * 10n ** 17n, start: 10n ** 18n } }).transport, IN);
   console.log(`X0 sd<0: ${show(a)}`);
   assert.notEqual(a.verdict, 'MEASURED');
