@@ -37,7 +37,7 @@ import {
 import { memGet, memPut, singleflight } from './resilience.js';
 import { RpcRouter, rpcFromEnv, type RpcConfig, type TransportOptions, scrubUrls } from './rpc.js';
 import {
-  MULTICALL3, MULTICALL3_ABI, planUsdVias, usdFromVias,
+  ARBSYS, ARBSYS_ABI, ARBSYS_BLOCK_CHAINS, MULTICALL3, MULTICALL3_ABI, planUsdVias, usdFromVias,
   type UsdLegReading, type UsdValue, type UsdValueRequest, type UsdViaReading,
 } from './usd.js';
 import type {
@@ -422,8 +422,12 @@ export class BlazePhoenix {
     const { usdc: dollar, weth } = CHAINS[ctx.chainId];
     const token = t.address;
     const identity = token.toLowerCase() === dollar.toLowerCase();
+    // The block the RPC tags count: block.number is the L1 block on Arbitrum chains.
+    const arbBlock = ARBSYS_BLOCK_CHAINS.includes(ctx.chainId);
     const enc = {
-      block: { target: MULTICALL3, callData: encodeFunctionData({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber' }) },
+      block: arbBlock
+        ? { target: ARBSYS, callData: encodeFunctionData({ abi: ARBSYS_ABI, functionName: 'arbBlockNumber' }) }
+        : { target: MULTICALL3, callData: encodeFunctionData({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber' }) },
       decimals: (a: Address) => ({ target: a, callData: encodeFunctionData({ abi: ERC20_ABI, functionName: 'decimals' }) }),
       preview: (l: UsdLegReading) => ({
         target: ctx.dep.contracts.quoter,
@@ -431,9 +435,16 @@ export class BlazePhoenix {
       }),
     };
     type R = { success: boolean; returnData: Hex };
-    const blockOf = (r: R) => {
-      if (!r.success) throw new BlazeError('rpc_error', 'usdValue: Multicall3.getBlockNumber failed');
-      return decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', data: r.returnData });
+    const blockOf = (r: R): bigint => {
+      const what = arbBlock ? 'ArbSys.arbBlockNumber' : 'Multicall3.getBlockNumber';
+      if (!r.success) throw new BlazeError('rpc_error', `usdValue: ${what} failed`);
+      try {
+        return arbBlock
+          ? decodeFunctionResult({ abi: ARBSYS_ABI, functionName: 'arbBlockNumber', data: r.returnData })
+          : decodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', data: r.returnData });
+      } catch {
+        throw new BlazeError('rpc_error', `usdValue: ${what} answered no block number`);
+      }
     };
     const decimalsOf = (r: R): number | null => {
       if (!r.success) return null;

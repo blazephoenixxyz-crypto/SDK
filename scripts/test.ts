@@ -309,6 +309,7 @@ interface MockOpts {
   // previewPlan per pair: the netOut (and optionally the hops) the Quoter answers, or its revert data
   usd?: (tIn: Address, tOut: Address, amountIn: bigint) => { netOut: bigint; hops?: Hop[] } | { revert: Hex };
   decimalsFor?: Record<string, number | 'revert'>;   // decimals() per lowercase address
+  arbsysEmpty?: boolean;                             // ArbSys (0x64) answers no data, as on a chain without it
 }
 function mockProvider(o: MockOpts = {}) {
   const calls: { method: string; fn?: string; to?: string; block?: unknown }[] = [];
@@ -339,12 +340,18 @@ function mockProvider(o: MockOpts = {}) {
         const tag = p[1];
         calls.push({ method, fn: `multicall.${d.functionName}`, to: t, block: tag });
         const at = typeof tag === 'string' && tag.startsWith('0x') ? BigInt(tag) : (head += 1n);
-        const blockData = encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', result: at });
+        // Arbitrum and Robinhood Chain (Orbit), measured live 11-20: block.number, so
+        // Multicall3.getBlockNumber, is the L1 block; ArbSys(0x64).arbBlockNumber() is the
+        // block the tag names. Elsewhere 0x64 has no code: success with no data.
+        const arb = [42161, 4663].includes(o.chainId ?? 8453);
+        const blockData = encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', result: arb ? 26_452_919n : at });
+        const arbData: Hex = arb && !o.arbsysEmpty ? encodeFunctionResult({ abi: MULTICALL3_ABI, functionName: 'getBlockNumber', result: at }) : '0x';
         if (d.functionName === 'getBlockNumber') return blockData;
         const [c3] = d.args as unknown as [readonly { target: Address; allowFailure: boolean; callData: Hex }[]];
         const results: { success: boolean; returnData: Hex }[] = [];
         for (const c of c3) {
           if (c.target.toLowerCase() === t) { results.push({ success: true, returnData: blockData }); continue; }
+          if (c.target.toLowerCase() === '0x0000000000000000000000000000000000000064') { results.push({ success: true, returnData: arbData }); continue; }
           try {
             results.push({ success: true, returnData: await provider.request({ method: 'eth_call', params: [{ to: c.target, data: c.callData }, `0x${at.toString(16)}`] }) as Hex });
           } catch (e) {
@@ -1080,6 +1087,41 @@ console.log('client · usdValue');
       [2, ['latest', '0x101'], 0x101n,
         [[[TKN, USDC], 5_000_000n, undefined], [[TKN, WETH, USDC], 3_000_000n, 10n ** 18n], [[TKN, X(1), USDC], 4_000_000n, 7n * 10n ** 18n]],
         3_000_000n]);
+  }
+  // Arbitrum: block.number is the L1 block — mutant: Multicall3.getBlockNumber on every chain
+  // (reports the L1 block 26452919 and pins request 2 to it)
+  {
+    const ARB_USDC = CHAINS[42161].usdc, ARB_WETH = CHAINS[42161].weth;
+    const { provider, calls } = mockProvider({ chainId: 42161, quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2', decimalsFor: { [ARB_USDC.toLowerCase()]: 6 }, usd: table({
+      [key(TKN, ARB_USDC)]: (a) => ({ netOut: 5_000_000n, hops: [hop(TKN, X(1), a), hop(X(1), ARB_USDC, 7n * 10n ** 18n)] }),
+      [key(TKN, ARB_WETH)]: () => ({ netOut: 10n ** 15n }),
+      [key(ARB_WETH, ARB_USDC)]: () => ({ netOut: 3_000_000_000n }),
+      [key(TKN, X(1))]: () => ({ netOut: 7n * 10n ** 18n }),
+      [key(X(1), ARB_USDC)]: () => ({ netOut: 4_000_000n }),
+    }) });
+    const blaze = new BlazePhoenix({ rpc: { arbitrum: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    const v = await blaze.usdValue({ chain: 'arbitrum', token: TKN, amountIn: 10n ** 18n });
+    eq('usdValue on Arbitrum: the block is ArbSys.arbBlockNumber (the block RPC tags count), not the L1 block.number; request 2 is pinned to it',
+      [v.rpc.requests, calls.filter((c) => c.fn === 'multicall.aggregate3').map((c) => c.block), v.blockNumber, v.usdValue],
+      [2, ['latest', '0x101'], 0x101n, 3_000_000n]);
+  }
+  // Robinhood Chain (Orbit) at a given block — mutant: 4663 left out of ARBSYS_BLOCK_CHAINS
+  {
+    const RH_USDG = CHAINS[4663].usdc;
+    const { provider, calls } = mockProvider({ chainId: 4663, quoter: '0xE1aE5f49013920CF71De8CED4043e14C4d63416b',
+      decimalsFor: { [RH_USDG.toLowerCase()]: 6 }, usd: table({ [key(TKN, RH_USDG)]: () => ({ netOut: 2_000_000n }) }) });
+    const blaze = new BlazePhoenix({ rpc: { robinhood: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    const v = await blaze.usdValue({ chain: 'robinhood', token: TKN, amountIn: 10n ** 18n, blockNumber: 0x200n });
+    eq('usdValue on Robinhood Chain: the reported block is the pinned block, read from ArbSys',
+      [calls.filter((c) => c.fn === 'multicall.aggregate3').map((c) => c.block), v.blockNumber, v.usdValue], [['0x200'], 0x200n, 2_000_000n]);
+  }
+  // ArbSys answers nothing — mutant: the decode error of blockOf not wrapped (a raw viem error, or a value)
+  {
+    const { provider } = mockProvider({ chainId: 42161, quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2', arbsysEmpty: true, decimalsFor: { [CHAINS[42161].usdc.toLowerCase()]: 6 },
+      usd: table({ [key(TKN, CHAINS[42161].usdc)]: () => ({ netOut: 2_000_000n }) }) });
+    const blaze = new BlazePhoenix({ rpc: { arbitrum: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    await throwsCode('usdValue: no block number from ArbSys → rpc_error, never a value at an unknown block',
+      () => blaze.usdValue({ chain: 'arbitrum', token: TKN, amountIn: 10n ** 18n }), 'rpc_error');
   }
   // vias come from the DIRECT route only — mutant: the first decoded route (here T → WETH) is used
   {

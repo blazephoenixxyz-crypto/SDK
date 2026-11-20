@@ -23,6 +23,14 @@ export const MULTICALL3_ABI = parseAbi([
   'function getBlockNumber() view returns (uint256 blockNumber)',
 ]);
 
+/** ArbSys precompile: on Arbitrum and Arbitrum Orbit chains `block.number` (and so
+ *  Multicall3.getBlockNumber) is the L1 block; arbBlockNumber() is the L2 block that RPC
+ *  block tags count, so the reported block and the pinned block are the same number. */
+export const ARBSYS: Address = '0x0000000000000000000000000000000000000064';
+export const ARBSYS_ABI = parseAbi(['function arbBlockNumber() view returns (uint256)']);
+/** Chains whose block number is read from ArbSys: Arbitrum One and Robinhood Chain (Orbit). */
+export const ARBSYS_BLOCK_CHAINS: readonly number[] = [42161, 4663];
+
 /** Vias per call, the direct one included. */
 export const USD_MAX_VIAS = 8;
 /** WETH → dollar leg is priced at 1 WETH and scaled. */
