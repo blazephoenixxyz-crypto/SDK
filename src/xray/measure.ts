@@ -1,10 +1,10 @@
 // Pure decoder of an XRayProbe Result (port of deep-xray@8d6e81c core/measure.mjs): integer ratios in
 // basis points, never a float, never a default. A quantity whose inputs were not measured is null
-// ("not measured"), never 0. Taxes round UP (cautious); the round-trip loss rounds UP too.
+// ("not measured"), never 0. Taxes round UP (cautious).
 // Divergences from measure.mjs (V-X1): an absent `unmeasured` field is not 0; `sellOut` is reported and a
 // sale that delivers 0 wei condemns; the swap-side sell tax counts in the verdict; a wallet transfer that
-// was not measured is NOT_MEASURED. roundTripLossBps is not a tax (it includes pool fees and price impact):
-// it never condemns, but at or above the threshold it caps the verdict at WARN.
+// was not measured is NOT_MEASURED. roundTripLossBps stays null (V8): ETH out vs ETH in mixes trading fees and
+// price impact with the tax, so the verdict never reads it.
 import type { Status, Verdict } from './lattice.js';
 
 export const PROTOCOL_FEE_BPS_V1 = 28n; // Router 1.0.0 PROTOCOL_FEE_BPS (router-BlazePhoenixRouter.sol:90)
