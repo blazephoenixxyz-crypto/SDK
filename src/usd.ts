@@ -52,12 +52,21 @@ export interface UsdValueRequest {
   blockNumber?: bigint;
 }
 
+/** One venue of a route hop as the Quoter answered it: its address, its kind, its share of the hop's input and its expected output. */
+export interface UsdRouteLeg { pool: Address; kind: number; amountIn: bigint; out: bigint }
+/** One hop of the Quoter's route for a leg: tokenIn → tokenOut over one or more pools. */
+export interface UsdRouteHop { tokenIn: Address; tokenOut: Address; amountIn: bigint; out: bigint; legs: UsdRouteLeg[] }
+
 export interface UsdLeg {
   tokenIn: Address;
   tokenOut: Address;
   amountIn: bigint;
   /** The Quoter's netOut for this leg, when it measured one. */
   out?: bigint;
+  /** The Quoter's Route.expectedImpactBps for this leg, from the same previewPlan answer. */
+  impactBps?: bigint;
+  /** The Quoter's route for this leg, from the same previewPlan answer. */
+  route?: UsdRouteHop[];
 }
 
 export interface UsdVia {
@@ -91,6 +100,9 @@ export interface UsdValue {
   /** The block every read ran in (pinned by its hash); null when no block hash held through the
    *  reads in USD_SNAPSHOT_TRIES snapshots (reorgs, or a node without EIP-1898 blockHash). */
   blockNumber: bigint | null;
+  /** The timestamp (seconds) in the header of that block, the same header whose hash pinned the
+   *  reads; null when not measured or when the header carried no timestamp. */
+  blockTimestamp: bigint | null;
   /** Minimum over the measured vias, in dollar-token base units; null when no via measured. */
   usdValue: bigint | null;
   /** usdValue in dollar units, or 'not measured' (never "0"). */
@@ -113,6 +125,9 @@ export interface UsdLegReading {
   amountIn: bigint;
   netOut?: bigint;
   hops?: number;
+  /** Route.expectedImpactBps and the route's hops, from the same previewPlan answer (optional). */
+  impactBps?: bigint;
+  route?: UsdRouteHop[];
   error?: string;
 }
 export interface UsdViaReading { path: Address[]; legs: UsdLegReading[] }
@@ -127,6 +142,8 @@ export interface UsdReadings {
   amountIn: bigint;
   tokenDecimals: number | null;
   blockNumber: bigint;
+  /** The pinned header's timestamp in seconds; omitted or null when the header carried none. */
+  blockTimestamp?: bigint | null;
   vias: UsdViaReading[];
   rpcRequests: number;
 }
@@ -158,6 +175,7 @@ export function planUsdVias(token: Address, amountIn: bigint, dollar: Address, w
 function measure(v: UsdViaReading): UsdVia {
   const legs: UsdLeg[] = v.legs.map((l) => ({
     tokenIn: l.tokenIn, tokenOut: l.tokenOut, amountIn: l.amountIn, ...(l.netOut !== undefined ? { out: l.netOut } : {}),
+    ...(l.impactBps !== undefined ? { impactBps: l.impactBps } : {}), ...(l.route !== undefined ? { route: l.route } : {}),
   }));
   const scaled = v.legs.length === 2 ? { scaledFrom: v.legs[1]!.amountIn } : {};
   const no = (reason: string): UsdVia => ({ path: v.path, status: 'not measured', reason, legs, ...scaled });
@@ -190,7 +208,7 @@ export function usdNotMeasured(r: { chainId: number; version: string; dollarToke
   const symbol = symbolOf(r.chainId);
   return {
     chainId: r.chainId, version: r.version, label: `USD (via ${symbol})`, dollarToken: r.dollarToken, dollarDecimals: null,
-    token: r.token, amountIn: r.amountIn, tokenDecimals: null, blockNumber: null, usdValue: null, usd: 'not measured',
+    token: r.token, amountIn: r.amountIn, tokenDecimals: null, blockNumber: null, blockTimestamp: null, usdValue: null, usd: 'not measured',
     unitPrice: 'not measured', vias: [], spread: null, rpc: { requests: r.rpcRequests }, basis: basisOf(symbol),
   };
 }
@@ -221,6 +239,7 @@ export function usdFromVias(r: UsdReadings): UsdValue {
     amountIn: r.amountIn,
     tokenDecimals: r.tokenDecimals,
     blockNumber: r.blockNumber,
+    blockTimestamp: r.blockTimestamp ?? null,
     usdValue,
     usd: usdValue === null ? 'not measured' : formatUnits(usdValue, r.dollarDecimals),
     unitPrice: unit,

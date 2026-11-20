@@ -1,9 +1,43 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — quoted USD prices, on one chain and across chains
 
 Some of these functions are already prepared for the V2 DEX and the V4 staking engine;
 the live contracts they read today are unchanged.
+
+- `crossChainPrice({ chains, client })`: the quoted price of one token on several chains,
+  `usdValue` on each chain's own RPC in parallel, as USD per whole token × 1e18 (`USD_E18`),
+  rounded down; with min, max, `spreadBps` and `skewSeconds` (both `null` with fewer than two
+  chains). The token on each chain is `ETH`, `WETH`, `USDC`, `USDG` or an address; any other
+  symbol throws `bad_request`. A chain that measured nothing is `'not_measured'` with its reason,
+  never 0.
+- `crossChainAverage({ chains, client, maxSkewSeconds })`: the same, plus `medianPriceUsd` (the
+  main value) and `depthWeightedPriceUsd`, weighted by the depth two order sizes quoted in the
+  same block measure, `D = (a₂ − a₁) · p₁ · p₂ / ((p₁ − p₂) · 10^decimals)`; `null` with a
+  reason when a chain's depth is not measured. `maxSkewSeconds` excludes chains whose block is
+  older than the newest measured block by more than that; `included` and `excluded` list them.
+- Each entry gives its size as `amountIn` (base units) or `amount` (whole tokens, a decimal
+  string such as `'1'` or `'0.5'`), exactly one; `amount` is converted on each chain with the
+  `decimals()` read on that chain, checked against the decimals read in the pinned block. Too
+  many fraction digits, or a failed `decimals()`, makes that chain `'not_measured'` with its
+  reason. `depthAmountIn` / `depthAmount` likewise. A token that does not exist on a chain:
+  leave that chain out.
+- Per chain, `derivation`, taken from `usdValue` (not recomputed): the via of the minimum as a
+  readable path (`'TOKEN → WETH → USDC'`), its legs (`amountIn → netOut`, `impactBps`, hops
+  with each venue's address, `kind`, `amountIn`, `out`, and the bridge tokens), `scaledFrom` when
+  scaled, and every via tried with its status and reason.
+- Per chain, `impactBps`: the Quoter's `Route.expectedImpactBps` for the first leg of that via,
+  from the same `previewPlan` answer (no extra RPC). The Solver computes it as the mean of its
+  legs' impacts weighted by amount, not compounded. `impactSource: 'quoter'`; `impactBasis`
+  `'measured'` when every venue of the route has a kind the Quoter reads reserves or concentrated
+  liquidity for, `'modeled'` (number kept, venues named in `impactNote`) when any venue uses the
+  Quoter's constant default impact (V4, V4-native, external wrapper). Not measured, or the dollar
+  token itself: `null`, with `impactNote`, never 0.
+- `aggregateQuotedPrices` (the aggregation without RPC), `quotedUnitPriceUsd`,
+  `formatQuotedUsd`, `wholeToBase` and `impactKindMeasured`.
+- `usdValue` returns `blockTimestamp`, read from the header whose hash pins the reads (`null`
+  when not measured or absent); `usdFromVias` takes it as an optional reading. Each `UsdLeg`
+  carries the Quoter's `impactBps` and `route` (optional, additive).
 
 - `usdValue({ chain, token, amountIn })`: the USD value of an amount, read on the Quoter only
   (no oracle, no price API) in one `Multicall3.aggregate3` eth_call, two when the direct route
