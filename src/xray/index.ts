@@ -6,6 +6,7 @@ import { pinBlock, makeCtx, XRAY_DEPLOYMENTS } from './ctx.js';
 import { scan, type Gen } from './scan.js';
 import { buildReport, type XrayReport } from './report.js';
 import { validMaxTaxBps } from './measure.js';
+import { nitroUncovered } from './tiers.js';
 
 export type XrayInput = { chainId: number; token: string; amountIn: bigint; maxTaxBps: number; N?: number; X?: string; Y?: string };
 export type Transport = (batch: Rpc[]) => Promise<unknown[]>;
@@ -31,9 +32,11 @@ function* xrayProgram(input: XrayInput, io: Io): Gen<XrayReport> {
   io.pin({ number: BigInt(blk.number), hash: blk.hash });
   const ids = { X: actor(input, 'X'), Y: actor(input, 'Y') };
   const mk = (o: any = {}) => makeCtx(input.chainId, input.token, blk, { buyIn: input.amountIn, N, mode: 'd4', ...o }, ids);
-  const sc = blk.code?.token === false
+  const sc0 = blk.code?.token === false
     ? { tier: null, rung: null, status: 'NOT_MEASURED', why: 'token has no code at the pinned block', uncovered: null, limits: [], probes: [] }
     : yield* scan(mk, [], { noC: blk.code?.mc3 === false ? 'Multicall3 codehash differs from the pin: tier C unavailable' : undefined });
+  // Nitro: contracts see the L1 block.number, so the later sale's gap does not cover a block-number gate (b2).
+  const sc = nitroUncovered(sc0, input.chainId);
   return buildReport({ chainId: input.chainId, block: blk, target: getAddress(input.token), amountIn: input.amountIn, maxTaxBps: input.maxTaxBps, scan: sc, ctx: mk() });
 }
 

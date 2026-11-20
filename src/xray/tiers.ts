@@ -27,6 +27,10 @@ export const LADDER = ['A:d4', 'A:d2', 'B', 'C'];
 /** Classes a tier cannot cover by construction (reported next to every result as `uncovered`). */
 const UNC_B = ['a6', 'a8', 'b2', 'e1', 'i3'];
 export const TIER_UNCOVERED: any = { A: [], B: UNC_B, C: [...UNC_B, 'a1', 'a7'] };
+/** Arbitrum Nitro chains with an X-Ray deployment: contracts see the L1 block.number (TIER_LIMITS.A). */
+export const NITRO_CHAINS = [42161];
+/** On Nitro the later sale's gap does not move block.number: a block-number gate (b2) is not covered at tier A. */
+export const nitroUncovered = (sc: any, chainId: number) => (sc.tier === 'A' && NITRO_CHAINS.includes(chainId) ? { ...sc, uncovered: ['b2'] } : sc);
 const UNAVAIL: any = { cls: 'unavailable', why: 'provider unavailable' };
 /**
  * Probe answer -> ok | reverted | down | unavailable. Rate limit / transport / non-JSON is "provider
@@ -73,7 +77,7 @@ export function classifyToken(resp: any) {
   if (k.cls === 'result' && k.result !== null) return { cls: 'ok' };
   if (k.cls === 'unavailable') return { cls: 'not-measured', code: resp?.httpStatus ?? null, why: 'provider unavailable' + (resp?.httpStatus ? ' (http ' + resp.httpStatus + ')' : '') };
   const e: any = k.cls === 'error' ? k : {};
-  return { cls: 'not-measured', code: e.code ?? null, why: `error ${e.code ?? '?'}: ${String(e.message ?? '').toLowerCase().slice(0, 80)}` };
+  return { cls: 'not-measured', code: e.code ?? null, why: `node error ${Number.isSafeInteger(e.code) ? e.code : '?'}` };
 }
 
 /** Tier A retries by CODE, each once: -38021 (timestamps out of order) -> node clock; -38013 (intrinsic gas) -> l1gas. */
@@ -386,6 +390,8 @@ export function toResult(ctx: any, known: any, m: any, tier: any) {
       r.sellLaterIn = a.x > b.x ? a.x - b.x : 0n; r.sellLaterOut = b.w > a.w ? b.w - a.w : 0n;
       // The later pool delta is measured only when every pool balance was read (as UM.POOL_SELL for the sale at B).
       if (a.okP && b.okP && !pv4(known.routeLater, 0)) r.sellLaterPoolReceived = b.pools - a.pools;
+      // The token's own balance across the later sale (X1); unread stays absent (not measured), never 0.
+      if (a.s !== null && b.s !== null) r.sellLaterTokenSelfDelta = b.s - a.s;
     }
   }
   if (tier === 'A' && m.quoteLater) { const ql = quoteOf(m.quoteLater); r.quoteLater = { ok: !!(ql && ql.canExecute) }; }

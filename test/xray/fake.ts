@@ -49,9 +49,19 @@ export type FakeOpts = {
   noRoute?: boolean; noSellRoute?: boolean; nitroLater?: boolean; buyRevert?: boolean; sellRevert?: boolean; tokenCode?: string; mc3Code?: string; chainId?: number;
   /** Fee-on-transfer tax of TOKEN in bps, on every token move (pool -> buyer, seller -> pool, wallet transfers). */
   taxBps?: bigint;
+  /** V4-verif: sell-only tax (transfers TO the pool) paid to `holder` (default TOKEN itself); before crediting, when the
+   *  holder holds >= cap it sells `cap` into the same pool (swapback, uniswap-v2 template). `start` seeds the holder. */
+  swapback?: { taxBps: bigint; cap: bigint; start: bigint; holder?: string };
 };
 function exec(st: any, o: FakeOpts, weth: string, actor: string, to: string, data: string, value: bigint) {
-  const bal = (t: string, a: string): bigint => st[lc(t)]?.[lc(a)] ?? (lc(a) === lc(POOL) ? RESERVE : 0n);
+  const sb = o.swapback, H = sb ? (sb.holder ?? TOKEN) : '';
+  const bal = (t: string, a: string): bigint => st[lc(t)]?.[lc(a)] ?? (lc(a) === lc(POOL) ? RESERVE : sb && lc(t) === lc(TOKEN) && lc(a) === lc(H) ? sb.start : 0n);
+  // swapback + sell tax on a move of v tokens from `from` to the pool; returns what the pool is credited for the mover.
+  const toPool = (from: string, v: bigint): bigint => {
+    const tax = (v * sb!.taxBps) / BPS;
+    if (bal(TOKEN, H) >= sb!.cap) { add(TOKEN, H, -sb!.cap); add(TOKEN, POOL, sb!.cap); add(weth, POOL, -sb!.cap / RATE); add(weth, H, sb!.cap / RATE); }
+    add(TOKEN, from, -v); add(TOKEN, H, tax); add(TOKEN, POOL, v - tax); return v - tax;
+  };
   const add = (t: string, a: string, v: bigint) => { st[lc(t)] ??= {}; st[lc(t)][lc(a)] = bal(t, a) + v; };
   const ok = (ret = '0x') => ({ ok: true, ret });
   const rev = (ret: string) => ({ ok: false, ret });
@@ -64,7 +74,8 @@ function exec(st: any, o: FakeOpts, weth: string, actor: string, to: string, dat
     case 'approve': return ok(T(true));
     case 'balanceOf': return ok(T(bal(to, f.args[0])));
     case 'previewPlan': return ok(preview(f.args[0], f.args[1], f.args[2], !(o.noRoute || (o.noSellRoute && lc(f.args[0]) === lc(TOKEN)))));
-    case 'transfer': if (bal(to, actor) < f.args[1]) return rev(ERR('balance')); add(to, actor, -f.args[1]); add(to, f.args[0], lc(to) === lc(TOKEN) ? taxed(o, f.args[1]) : f.args[1]); return ok(T(true));
+    case 'transfer': if (bal(to, actor) < f.args[1]) return rev(ERR('balance'));
+      if (sb && lc(to) === lc(TOKEN) && lc(f.args[0]) === lc(POOL)) { toPool(actor, f.args[1]); return ok(T(true)); } add(to, actor, -f.args[1]); add(to, f.args[0], lc(to) === lc(TOKEN) ? taxed(o, f.args[1]) : f.args[1]); return ok(T(true));
     case 'swapExactIn': {
       const [route, amt, , rcpt] = f.args;
       if (lc(route.hops[0].tokenIn) === lc(weth)) {
@@ -73,6 +84,7 @@ function exec(st: any, o: FakeOpts, weth: string, actor: string, to: string, dat
         add(weth, actor, -amt); add(weth, POOL, amt); add(TOKEN, POOL, -amt * RATE); add(TOKEN, rcpt, net); return ok(T(net));
       }
       if (o.sellRevert) return rev(BPC_TRANSFER);
+      if (sb) { const g = toPool(actor, amt), w = g / RATE; add(weth, POOL, -w); add(weth, rcpt, w); return ok(T(w)); }
       const got = taxed(o, amt), wout = got / RATE;
       add(TOKEN, actor, -amt); add(TOKEN, POOL, got); add(weth, POOL, -wout); add(weth, rcpt, wout); return ok(T(wout));
     }

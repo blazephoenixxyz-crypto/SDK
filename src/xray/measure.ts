@@ -61,6 +61,21 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: 
   out.laterRequired = (tier ?? r.tier) === 'A';
   const um = B(r.unmeasured);
   const has = (bit: bigint) => (um & bit) !== 0n;
+  // A token move that credits the receiver MORE than the sender sent is fed by someone else (swapback) in the
+  // same move: the delta is not the seller's tax, so it is not measured (X3), never a negative tax.
+  const tax = (got: unknown, sent: unknown, what: string): bigint | null => {
+    const x = lossBps(got, sent);
+    if (x !== null && x < 0n) { out.notes.push(`${what}: receiver credited more than sent (swapback): tax not identifiable`); return null; }
+    return x;
+  };
+  // The pool delta of a sale is the seller's tax only when the token's own balance was read and did not move
+  // (V3, X2): a self balance that rose or fell means the token taxed into itself or sold from it (swapback)
+  // in the same sale, and the swapback is not separable from the tax. Absent is not 0.
+  const selfStill = (d: unknown, what: string): boolean => {
+    if (d === undefined || d === null) { out.notes.push(`${what}: token contract balance not measured: swap-side tax not identifiable`); return false; }
+    if (B(d) !== 0n) { out.notes.push(`${what}: token contract balance moved (tax to itself or swapback): swap-side tax not identifiable`); return false; }
+    return true;
+  };
   Object.assign(out, measureDirectSell(r));
   if (!r.quoteBuy?.ok) { out.notes.push('no buy route'); return out; }
   out.buyOk = ran(r.buy);
@@ -83,25 +98,23 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: 
       // sellOut needs both the WETH and the seller's token balance (V6): unreadable is null, never 0 wei.
       if (!has(UM.WETH) && !has(UM.BAL_X)) out.sellOut = B(r.sellOut);
       // The pool delta is the seller's tax only when the token's own balance was read and did not fall (V3).
-      const sd = r.sellTokenSelfDelta;
-      if (has(UM.SELF) || sd === undefined || sd === null) out.notes.push('token contract balance not measured: swap-side tax not identifiable');
-      else if (B(sd) < 0n) out.notes.push('token contract balance fell during the sell (swapback): swap-side tax not identifiable');
-      else if (!has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxSwapBps = lossBps(Q, S);
+      if (selfStill(has(UM.SELF) ? null : r.sellTokenSelfDelta, 'sell') && !has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxSwapBps = tax(Q, S, 'sell');
       // No round-trip guard (V8): the ETH out vs ETH in mixes the pool fees and price impact with the tax, and
       // the sell tax is read directly (sellTaxBps, sellTaxSwapBps, the later sale), so roundTripLossBps stays null.
     }
   } else out.notes.push('no sell route at this block');
   // A transfer that ran is read whatever its revert data or sent amount (V7); not run is null.
   out.transferOk = ran(r.transfer);
-  if (out.transferOk && !has(UM.BAL_Y) && !has(UM.BAL_X)) out.transferTaxBps = lossBps(r.transferReceived ?? 0n, r.transferSent ?? 0n);
+  if (out.transferOk && !has(UM.BAL_Y) && !has(UM.BAL_X)) out.transferTaxBps = tax(r.transferReceived ?? 0n, r.transferSent ?? 0n, 'wallet transfer');
   out.poolTransferOk = ran(r.poolTransfer);
-  if (out.poolTransferOk && !has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxBps = lossBps(r.poolTransferReceived ?? 0n, r.poolTransferSent ?? 0n);
+  if (out.poolTransferOk && !has(UM.POOL_SELL) && !has(UM.BAL_X)) out.sellTaxBps = tax(r.poolTransferReceived ?? 0n, r.poolTransferSent ?? 0n, 'transfer to the pair');
   if (out.laterRequired && r.sellLater) {
     out.sellLaterOk = ran(r.sellLater);
     if (out.sellLaterOk) {
       const has3 = (k: string) => r[k] !== undefined && r[k] !== null;
       if (has3('sellLaterOut')) out.sellLaterOut = B(r.sellLaterOut);
-      if (has3('sellLaterIn') && has3('sellLaterPoolReceived')) out.sellLaterTaxSwapBps = lossBps(r.sellLaterPoolReceived, r.sellLaterIn);
+      // The later sale takes the same self-balance gate as the sale at B (X1): it must not be weaker.
+      if (has3('sellLaterIn') && has3('sellLaterPoolReceived') && selfStill(r.sellLaterTokenSelfDelta, 'later sell')) out.sellLaterTaxSwapBps = tax(r.sellLaterPoolReceived, r.sellLaterIn, 'later sell');
     }
   }
   return out;
@@ -155,6 +168,12 @@ export function instrumentVerdict(m: Measure, { maxTaxBps }: { maxTaxBps: number
   for (const k of TAXES) {
     const x = m[k];
     if (x !== undefined && x !== null && x >= BigInt(maxTaxBps)) return { v: 'CONDEMN', status: 'CONDEMN', why: `${k} ${x} >= ${maxTaxBps}` };
+  }
+  // A negative tax on any reading (the receiver credited more than was sent: swapback, reflection) is never
+  // clean (X3); measure() already leaves the swap-side readings null, this also covers the buy and the direct sale.
+  for (const k of TAXES) {
+    const x = m[k];
+    if (x !== undefined && x !== null && x < 0n) return nm(`${k} negative`);
   }
   if (routeOnly) return { v: 'WARN', status: 'WARN', why: 'route', text: ROUTE_TEXT };
   if (m.buyOk !== true) return nm('buy not measured');
