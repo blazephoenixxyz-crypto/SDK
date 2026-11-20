@@ -93,6 +93,7 @@ export interface UsdValue {
   vias: UsdVia[];
   /** Over the measured vias, when there are at least two. No threshold, no verdict. */
   spread: UsdSpread | null;
+  /** The usdValue eth_calls (1 or 2); client setup (eth_chainId, registry checks) is not counted. */
   rpc: { requests: number };
   basis: string;
 }

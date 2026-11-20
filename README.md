@@ -207,9 +207,13 @@ The USD value of an amount, read on the Quoter only: no oracle, no price API. Th
   bps) shows how far they are apart; there is no threshold and no verdict.
 - **"not measured", never 0.** A via whose call reverts, whose route has 0 hops or whose `netOut` is 0
   measured nothing. If no via measured, `usdValue` is `null` and `usd` is `'not measured'`.
-- **1 or 2 RPC requests.** One `Multicall3.aggregate3` eth_call reads the block number, the
+- **1 or 2 eth_calls.** One `Multicall3.aggregate3` eth_call reads the block number, the
   decimals and every quote; a second one, pinned to the same block, runs only when the direct
-  route touches more tokens. `usdFromVias` is the same computation without RPC.
+  route touches more tokens. `rpc.requests` counts these eth_calls only: the client's own setup
+  can add requests the first time a chain is used (`eth_chainId` once per node, and the on-chain
+  check of a deployment taken from the remote registry). On Arbitrum and Robinhood Chain the block
+  number is read from ArbSys (`arbBlockNumber()`), because `block.number` there is the L1 block,
+  not the block RPC tags count. `usdFromVias` is the same computation without RPC.
 
 ## Errors
 
