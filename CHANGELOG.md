@@ -29,6 +29,16 @@ the live contracts they read today are unchanged.
   enumerated protocol errors and `Panic` carry a numeric `code`; any other custom error decodes
   by name without one, since its first argument is data. `Error(string)` keeps its text,
   reduced to one printable line of at most 120 characters.
+- `@blazephoenix/sdk/xray` (1.6.0), the token X-Ray: `runXray(transport, { chainId, token,
+  amountIn, maxTaxBps })` buys, sells and transfers the token in a simulation on your node at a
+  pinned block, and sends nothing. Tier A is one `eth_simulateV1` request and also sells at a
+  later block; tiers B and C are `eth_call`. Buy, sell and transfer taxes are in bps, and the sell
+  tax is read from the real sale. Anything that could not be read is `NOT_MEASURED`, never 0: a
+  token that sells its own balance during your sale, an unread balance, a later sale that did
+  not run. The verdict is `CONDEMN`, `WARN` or `MEASURED` against your `maxTaxBps` (an integer
+  from 1 to 10000, no default), and the report lists the cases its tier does not cover and its
+  limits. The ETH received is reported but not compared with the ETH paid, since it includes
+  fees and price impact. `xrayStart` and `xrayStep` run the same program without I/O.
 
 ## 1.2.1 — one meaning per field
 
