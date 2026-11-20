@@ -2000,6 +2000,31 @@ console.log('crossChain · crossChainPrice / crossChainAverage (RPC)');
         ['measured', 37n, 'not_measured', null, null, null, null, 'string', true, null]);
     }
     {
+      // the second size runs on the deployment the first resolved to, not on whatever "latest" is then
+      // mutant: the depth quote not pinned to the first quote's deployment (asked without version)
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const asked: (string | undefined)[] = [];
+      const spy = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { asked.push(q.version as string | undefined); return t.usdValue(q); }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: spy, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!;
+      eq('crossChainAverage: the second size is asked on the deployment the first quote ran on',
+        [asked.length, asked[0], typeof c.version, asked[1] === c.version, c.depth!.status], [2, undefined, 'string', true, 'measured']);
+    }
+    {
+      // a client whose second size answers from another deployment: that size is not measured
+      // mutant: the depth quote's deployment not checked against the first's
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const moved = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); return q.blockNumber === undefined ? v : { ...v, version: `${v.version}-other` }; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: moved, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const dp = r.chains[0]!.depth!;
+      eq('crossChainAverage: the second size quoted on another deployment → not_measured with its reason; no price, no depth-weighted price',
+        [dp.status, dp.priceUsd, dp.impactBps, /^quoted on deployment \S+-other, not on \S+$/.test(dp.reason ?? ''), r.depthWeightedPriceUsd], ['not_measured', null, null, true, null]);
+    }
+    {
       // a reorg replaces the first quote's block between the two quotes: same height, another block
       // mutant: the second size pinned by height only (it reads the new block and is measured)
       const m = routed([6]);

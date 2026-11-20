@@ -332,6 +332,8 @@ export interface QuotedChainPrice {
   /** The hash of that block, which pinned every read (null when not measured). */
   blockHash: Hex | null;
   blockTimestamp: bigint | null;
+  /** The protocol deployment the Quoter call ran on (absent when the read failed before usdValue answered). */
+  version?: string;
   vias: UsdVia[];
   /** The via the price comes from, its legs, and every via with its status (null when the
    *  chain's read failed before usdValue answered). */
@@ -422,9 +424,14 @@ export async function crossChainAverage(req: CrossChainAverageRequest): Promise<
     const { first, depthAmountIn } = await measureEntry(e);
     if (first.status !== 'measured' || depthAmountIn === null) return { ...first, depth: null };
     // the second size in the block of the first: the two prices differ by size only
-    const depth = await measureChain(e, depthAmountIn, first.blockNumber!, first.blockHash!);
+    // and on the deployment of the first: a registry refresh between the calls cannot move it
+    const depth = await measureChain({ ...e, ...(first.version ? { version: first.version } : {}) }, depthAmountIn, first.blockNumber!, first.blockHash!);
+    const unmeasured = (reason: string) => ({ ...first, depth: { ...depth, status: 'not_measured' as const, priceUsd: null, ...noImpact('the price is not measured'), reason } });
     if (depth.status === 'measured' && (depth.blockNumber !== first.blockNumber || depth.blockHash !== first.blockHash)) {
-      return { ...first, depth: { ...depth, status: 'not_measured' as const, priceUsd: null, ...noImpact('the price is not measured'), reason: `quoted in block ${depth.blockNumber} ${depth.blockHash}, not in block ${first.blockNumber} ${first.blockHash}` } };
+      return unmeasured(`quoted in block ${depth.blockNumber} ${depth.blockHash}, not in block ${first.blockNumber} ${first.blockHash}`);
+    }
+    if (depth.status === 'measured' && depth.version !== first.version) {
+      return unmeasured(`quoted on deployment ${depth.version}, not on ${first.version}`);
     }
     return { ...first, depth };
   }));
@@ -534,7 +541,7 @@ async function measureChain(e: PlannedEntry, amountIn: bigint, blockNumber?: big
   }
   const base: Omit<QuotedChainPrice, keyof Impact> = {
     chainId: e.chainId, status: 'not_measured', token: v.token, amountIn, priceUsd: null, usdValue: v.usdValue,
-    dollarDecimals: v.dollarDecimals, tokenDecimals: v.tokenDecimals, blockNumber: v.blockNumber, blockHash: v.blockHash, blockTimestamp: v.blockTimestamp, vias: v.vias,
+    dollarDecimals: v.dollarDecimals, tokenDecimals: v.tokenDecimals, blockNumber: v.blockNumber, blockHash: v.blockHash, blockTimestamp: v.blockTimestamp, version: v.version, vias: v.vias,
     derivation: derivationOf(e, v),
   };
   const no = (reason: string): QuotedChainPrice => ({ ...base, reason, ...noImpact('the price is not measured') });
