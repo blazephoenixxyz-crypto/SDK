@@ -137,11 +137,12 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: 
       const S = B(r.sellIn), Q = B(r.sellPoolReceived);
       // sellOut needs both the WETH and the seller's token balance (V6): unreadable is null, never 0 wei.
       if (!has(UM.WETH) && !has(UM.BAL_X)) out.sellOut = B(r.sellOut);
+      // The self-balance floor needs only S and SELF read, never the pool delta (F1: a V4 first hop still condemns).
+      if (!has(UM.BAL_X) && !has(UM.SELF)) selfFloor(r.sellTokenSelfDelta, S);
       // The pool delta is the seller's tax only when the token's own balance was read and did not fall (V3).
       if (!has(UM.POOL_SELL) && !has(UM.BAL_X)) {
         const x = tax(Q, S, 'sell');
         floor(x);
-        if (!has(UM.SELF)) selfFloor(r.sellTokenSelfDelta, S);
         if (selfStill(has(UM.SELF) ? null : r.sellTokenSelfDelta, 'sell')) out.sellTaxSwapBps = x;
       } else selfStill(has(UM.SELF) ? null : r.sellTokenSelfDelta, 'sell');
       // No round-trip guard (V8): the ETH out vs ETH in mixes the pool fees and price impact with the tax, and
@@ -154,10 +155,10 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: 
   out.poolTransferOk = ran(r.poolTransfer);
   // The transfer to the pair is read on its own (F3): at A/C only with the token's own balance and the pair's anchor
   // balance read and still across it; tier B reads neither, so its tax there is not measured (TIER_LIMITS.B).
+  if (out.poolTransferOk && !has(UM.BAL_X)) selfFloor(r.poolTransferTokenSelfDelta, r.poolTransferSent);
   if (out.poolTransferOk && !has(UM.POOL_SELL) && !has(UM.BAL_X)) {
     const x = tax(r.poolTransferReceived ?? 0n, r.poolTransferSent ?? 0n, 'transfer to the pair');
     floor(x);
-    selfFloor(r.poolTransferTokenSelfDelta, r.poolTransferSent);
     if (!out.pairTransferCovered) out.notes.push('transfer to the pair: token contract balance not read at tier B: not measured');
     else if (selfStill(r.poolTransferTokenSelfDelta, 'transfer to the pair') && anchorStill(r.poolTransferPairAnchorDelta)) out.sellTaxBps = x;
   }
@@ -166,11 +167,11 @@ export function measure(r: ProbeResult, { feeBps = PROTOCOL_FEE_BPS_V1, tier }: 
     if (out.sellLaterOk) {
       const has3 = (k: string) => r[k] !== undefined && r[k] !== null;
       if (has3('sellLaterOut')) out.sellLaterOut = B(r.sellLaterOut);
+      selfFloor(r.sellLaterTokenSelfDelta, r.sellLaterIn);
       // The later sale takes the same self-balance gate as the sale at B (X1): it must not be weaker.
       if (has3('sellLaterIn') && has3('sellLaterPoolReceived')) {
         const x = tax(r.sellLaterPoolReceived, r.sellLaterIn, 'later sell');
         floor(x);
-        selfFloor(r.sellLaterTokenSelfDelta, r.sellLaterIn);
         if (selfStill(r.sellLaterTokenSelfDelta, 'later sell')) out.sellLaterTaxSwapBps = x;
       }
     }
