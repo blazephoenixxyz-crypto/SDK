@@ -425,19 +425,24 @@ export class BlazePhoenix {
   /** The block every aggregate of one usdValue reads, from the caller's node: its number and an
    *  EIP-1898 pin by hash. A pin by number reads whatever block holds that height after a reorg,
    *  and the height check still passes. */
-  private async usdSnapshot(ctx: Ctx, blockNumber?: bigint): Promise<{ n: bigint; at: BlockHashPin }> {
+  private async usdSnapshot(ctx: Ctx, blockNumber?: bigint, blockHash?: Hex): Promise<{ n: bigint; ts: bigint | null; at: BlockHashPin }> {
     let h: unknown;
     try {
-      h = await ctx.client.request({ method: 'eth_getBlockByNumber', params: [blockNumber !== undefined ? `0x${blockNumber.toString(16)}` : 'latest', false] } as never);
+      h = blockHash !== undefined
+        ? await ctx.client.request({ method: 'eth_getBlockByHash', params: [blockHash, false] } as never)
+        : await ctx.client.request({ method: 'eth_getBlockByNumber', params: [blockNumber !== undefined ? `0x${blockNumber.toString(16)}` : 'latest', false] } as never);
     } catch (e) {
       this.wrapReadError(e, 'usdValue');
     }
-    const { number: num, hash } = (h && typeof h === 'object' ? h : {}) as { number?: unknown; hash?: unknown };
+    if (blockHash !== undefined && h === null) throw new BlazeError('rpc_error', `usdValue: your RPC has no block ${blockHash} (a reorg replaced it, or the node never saw it)`);
+    const { number: num, hash, timestamp } = (h && typeof h === 'object' ? h : {}) as { number?: unknown; hash?: unknown; timestamp?: unknown };
     if (typeof num !== 'string' || !/^0x[0-9a-fA-F]+$/.test(num) || typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash))
       throw new BlazeError('rpc_error', 'usdValue: your RPC returned no block header to pin the measurement to');
     const n = BigInt(num);
     if (blockNumber !== undefined && n !== blockNumber) throw new BlazeError('rpc_error', `usdValue: your RPC answered the header of block ${n} for block ${blockNumber}`);
-    return { n, at: { blockHash: hash.toLowerCase() as Hex, requireCanonical: true } };
+    if (blockHash !== undefined && hash.toLowerCase() !== blockHash) throw new BlazeError('rpc_error', `usdValue: your RPC answered the header of block ${hash} for block ${blockHash}`);
+    const ts = typeof timestamp === 'string' && /^0x[0-9a-fA-F]+$/.test(timestamp) ? BigInt(timestamp) : null;
+    return { n, ts, at: { blockHash: hash.toLowerCase() as Hex, requireCanonical: true } };
   }
 
   /** USD value of `amountIn` of `token`, measured on the Quoter only (no oracle, no API):
@@ -452,6 +457,9 @@ export class BlazePhoenix {
     const ctx = await this.ctx(req);
     const t = this.resolveToken(ctx.chainId, req.token, 'token');
     const amountIn = await this.amountOf(ctx.client, ctx.chainId, { tokenIn: req.token, tokenOut: req.token, amountIn: req.amountIn }, t);
+    if (req.blockHash !== undefined && (typeof req.blockHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(req.blockHash)))
+      throw new BlazeError('bad_request', 'blockHash: give a block hash, 0x and 64 hex digits');
+    const pinHash = req.blockHash?.toLowerCase() as Hex | undefined;
     const { usdc: dollar, weth } = CHAINS[ctx.chainId];
     const token = t.address;
     const identity = token.toLowerCase() === dollar.toLowerCase();
@@ -493,7 +501,11 @@ export class BlazePhoenix {
       }
       try {
         const [pv] = decodeFunctionResult({ abi: QUOTER_ABI, functionName: 'previewPlan', data: r.returnData }) as unknown as [Preview, Route, boolean];
-        return { reading: { ...l, netOut: pv.netOut, hops: pv.route.hops.length }, route: pv.route };
+        const route = pv.route.hops.map((h) => ({
+          tokenIn: h.tokenIn, tokenOut: h.tokenOut, amountIn: h.amountIn, out: h.expectedOut,
+          legs: h.legs.map((g) => ({ pool: g.pool, kind: g.kind, amountIn: g.amountIn, out: g.expectedOut })),
+        }));
+        return { reading: { ...l, netOut: pv.netOut, hops: pv.route.hops.length, impactBps: pv.route.expectedImpactBps, route }, route: pv.route };
       } catch {
         return { reading: { ...l, error: 'the Quoter answer did not decode' } };
       }
@@ -515,7 +527,7 @@ export class BlazePhoenix {
     };
     const first = planUsdVias(token, amountIn, dollar, weth);
     for (let attempt = 0; attempt < USD_SNAPSHOT_TRIES; attempt++) {
-      const { n, at } = await this.usdSnapshot(ctx, req.blockNumber);
+      const { n, ts, at } = await this.usdSnapshot(ctx, req.blockNumber, pinHash);
       let got;
       try {
         got = await read(identity ? [] : first, at, n);
@@ -528,7 +540,7 @@ export class BlazePhoenix {
       }
       return usdFromVias({
         chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, dollarDecimals: got.dollarDecimals,
-        token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, vias: got.vias, rpcRequests: sent,
+        token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, blockHash: at.blockHash, blockTimestamp: ts, vias: got.vias, rpcRequests: sent,
       });
     }
     // no block hash held through every aggregate: not measured, never a value
