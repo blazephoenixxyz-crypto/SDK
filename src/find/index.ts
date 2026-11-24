@@ -3,7 +3,7 @@
 // checked for Unicode lookalikes, and ranked by the depth the BlazePhoenix Quoter MEASURES
 // (usdValue at a ladder of order sizes). Venue balances are shown beside depth, never instead
 // of it. Nothing is ever selected: the caller picks, and the warnings say why that is hard.
-import { createPublicClient, getAddress, parseAbi, type Address } from 'viem';
+import { createPublicClient, getAddress, parseAbi, type Address, type Hex } from 'viem';
 import { BlazePhoenix } from '../client.js';
 import { CHAINS, resolveChain } from '../constants.js';
 import { BlazeError } from '../errors.js';
@@ -29,7 +29,12 @@ export const V4_KINDS: readonly number[] = [4, 8];
 
 export const WARNINGS = {
   mostLiquid: 'The first candidate is the most liquid by measured depth. It is not "official": no list here is.',
-  dyor: (n: number) => `${n} tokens use this ticker; impostors copy tickers; do your own research.`,
+  /** n candidates read this ticker; `unread` candidates with code (or not known to have none) had no symbol read. */
+  dyor: (n: number, unread = 0) => unread === 0
+    ? `${n} tokens use this ticker; impostors copy tickers; do your own research.`
+    : n === 0
+      ? `How many tokens use this ticker is NOT_MEASURED: no candidate's symbol was read (${unread} not read); impostors copy tickers; do your own research.`
+      : `At least ${n} tokens use this ticker (the symbol of ${unread} more candidates was not read); impostors copy tickers; do your own research.`,
   notSafety: 'Liquidity is not safety: it can be withdrawn at any time.',
   liquidityVsDepth: 'Liquidity is the token balances the venues hold, valued at the measured marginal price; depth is what the Quoter measures can be sold before 1% / 5% price impact. In concentrated-liquidity venues (V3, V4) much of the balance can sit outside the current price range: high liquidity can come with low depth. Candidates are ranked by depth.',
   v4: 'Liquidity of a Uniswap V4 venue is NOT_MEASURED: its balances sit in the shared PoolManager, not at the venue, and no per-venue balance is read or estimated.',
@@ -45,7 +50,8 @@ export interface FindReader {
   hasCode(address: Address): Promise<boolean>;
   erc20(address: Address): Promise<{ symbol: string | null; name: string | null; decimals: number | null }>;
   balanceOf(token: Address, holder: Address): Promise<bigint | null>;
-  usdValue(token: Address, amountIn: bigint): Promise<UsdValue>;
+  /** With blockHash, every read runs in that block (EIP-1898); a node that lost it throws. */
+  usdValue(token: Address, amountIn: bigint, blockHash?: Hex): Promise<UsdValue>;
 }
 
 export interface FindTokenRequest {
@@ -182,18 +188,33 @@ function routeVenues(u: UsdValue): { pairAddress: Address; kind: number; tokens:
   return out;
 }
 
-async function measureDepth(reader: FindReader, token: Address, decimals: number, sizes: readonly number[]): Promise<{ depth: Depth; venues: ReturnType<typeof routeVenues> }> {
-  const probe = await reader.usdValue(token, 10n ** BigInt(decimals));
-  if (probe.usdValue === null || probe.dollarDecimals === null) return { depth: notMeasured(`price probe at one whole token not measured: ${viaReason(probe)}`, probe), venues: [] };
-  if (probe.usdValue === 0n) return { depth: notMeasured('price probe at one whole token quoted 0 dollar-token units', probe), venues: [] };
+/** A probe that quotes 0 at one whole token (worth less than one dollar-token base unit) is
+ *  retried at 10^3, 10^6, 10^9 and 10^12 whole tokens, no further. */
+const PROBE_RETRY_EXPONENTS: readonly number[] = [3, 6, 9, 12];
+
+async function measureDepth(reader: FindReader, token: Address, decimals: number, sizes: readonly number[]): Promise<{ depth: Depth; venues: ReturnType<typeof routeVenues>; blockHash: Hex | null }> {
+  const one = 10n ** BigInt(decimals);
+  let probeIn = one, at = 'one whole token';
+  let probe = await reader.usdValue(token, probeIn);
+  for (const e of PROBE_RETRY_EXPONENTS) {
+    if (probe.usdValue !== 0n) break;
+    probeIn = one * 10n ** BigInt(e);
+    at = `10^${e} whole tokens`;
+    probe = await reader.usdValue(token, probeIn);
+  }
+  if (probe.usdValue === null || probe.dollarDecimals === null) return { depth: notMeasured(`price probe at ${at} not measured: ${viaReason(probe)}`, probe), venues: [], blockHash: null };
+  if (probe.usdValue === 0n) return { depth: notMeasured(`price probe quoted 0 dollar-token units at one whole token and at up to 10^${PROBE_RETRY_EXPONENTS[PROBE_RETRY_EXPONENTS.length - 1]} whole tokens`, probe), venues: [], blockHash: null };
+  // Every size is read in the probe's block: a price that moves between reads is not impact.
+  const pin = probe.blockHash;
+  if (pin === null) return { depth: notMeasured('price probe carried no block hash: the sizes cannot be read in its block', probe), venues: [], blockHash: null };
   const dd = probe.dollarDecimals;
   const rungs: DepthRung[] = [];
   const venues: ReturnType<typeof routeVenues> = [];
   for (const usdSize of sizes) {
-    const amountIn = (BigInt(usdSize) * 10n ** BigInt(dd) * 10n ** BigInt(decimals)) / probe.usdValue;
+    const amountIn = (BigInt(usdSize) * 10n ** BigInt(dd) * probeIn) / probe.usdValue;
     if (amountIn === 0n) { rungs.push({ usdSize, amountIn, usdOut: null, impactBps: null, reason: 'size below one base unit' }); continue; }
     let u: UsdValue;
-    try { u = await reader.usdValue(token, amountIn); } catch (e) { rungs.push({ usdSize, amountIn, usdOut: null, impactBps: null, reason: msg(e) }); break; }
+    try { u = await reader.usdValue(token, amountIn, pin); } catch (e) { rungs.push({ usdSize, amountIn, usdOut: null, impactBps: null, reason: msg(e) }); break; }
     if (u.usdValue === null || u.usdValue === 0n) { rungs.push({ usdSize, amountIn, usdOut: null, impactBps: null, reason: u.usdValue === null ? viaReason(u) : 'quoted 0' }); break; }
     const ref = rungs.find((r) => r.usdOut !== null);
     const imp = ref ? impactBps(ref.usdOut!, ref.amountIn, u.usdValue, amountIn) : 0;
@@ -202,20 +223,20 @@ async function measureDepth(reader: FindReader, token: Address, decimals: number
     if (imp > IMPACT_5PCT_BPS) break;
   }
   const upTo1pct = reach(rungs, IMPACT_1PCT_BPS);
-  if (upTo1pct === null) return { depth: { ...notMeasured(rungs[0]?.reason ?? 'smallest size not measured', probe), rungs }, venues };
-  return { depth: { status: 'MEASURED', dollarToken: probe.dollarToken, dollarDecimals: dd, rungs, upTo1pct, upTo5pct: reach(rungs, IMPACT_5PCT_BPS) }, venues };
+  if (upTo1pct === null) return { depth: { ...notMeasured(rungs[0]?.reason ?? 'smallest size not measured', probe), rungs }, venues, blockHash: pin };
+  return { depth: { status: 'MEASURED', dollarToken: probe.dollarToken, dollarDecimals: dd, rungs, upTo1pct, upTo5pct: reach(rungs, IMPACT_5PCT_BPS) }, venues, blockHash: pin };
 }
 
 /** Venue balances valued at measured prices: the candidate at its smallest measured rung, the
- *  dollar token at 1, WETH at usdValue of one WETH; any other token is not valued. */
-async function measureLiquidity(reader: FindReader, chainId: number, token: Address, depth: Depth, venues: ReturnType<typeof routeVenues>): Promise<Liquidity> {
+ *  dollar token at 1, WETH at usdValue of one WETH in the depth's block; any other token is not valued. */
+async function measureLiquidity(reader: FindReader, chainId: number, token: Address, depth: Depth, venues: ReturnType<typeof routeVenues>, blockHash: Hex | null): Promise<Liquidity> {
   const ref = depth.rungs.find((r) => r.usdOut !== null);
   const weth = (CHAINS as Record<number, { weth: Address; usdc: Address }>)[chainId]?.weth;
   let wethPrice: Promise<[bigint, bigint] | null> | undefined;
   const price = (t: Address): Promise<[bigint, bigint] | null> => {
     if (ref && lc(t) === lc(token)) return Promise.resolve([ref.usdOut!, ref.amountIn]);
     if (depth.dollarToken && lc(t) === lc(depth.dollarToken)) return Promise.resolve([1n, 1n]);
-    if (weth && lc(t) === lc(weth)) return (wethPrice ??= reader.usdValue(weth, 10n ** 18n).then((u) => (u.usdValue ? [u.usdValue, 10n ** 18n] as [bigint, bigint] : null), () => null));
+    if (weth && blockHash && lc(t) === lc(weth)) return (wethPrice ??= reader.usdValue(weth, 10n ** 18n, blockHash).then((u) => (u.usdValue ? [u.usdValue, 10n ** 18n] as [bigint, bigint] : null), () => null));
     return Promise.resolve(null);
   };
   const out: VenueLiquidity[] = [];
@@ -246,7 +267,7 @@ function rpcReader(chainId: number, rpc: RpcSource, client?: BlazePhoenix): Find
     hasCode: async (a) => { const c = await pc.getCode({ address: a }); return typeof c === 'string' && c !== '0x'; },
     erc20: async (a) => ({ symbol: await read<string>(a, 'symbol'), name: await read<string>(a, 'name'), decimals: await read<number>(a, 'decimals') }),
     balanceOf: (t, h) => pc.readContract({ address: t, abi, functionName: 'balanceOf', args: [h] }).then((x) => x as bigint, () => null),
-    usdValue: (token, amountIn) => bp.usdValue({ chain: chainId, token, amountIn }),
+    usdValue: (token, amountIn, blockHash) => bp.usdValue({ chain: chainId, token, amountIn, ...(blockHash ? { blockHash } : {}) }),
   };
 }
 
@@ -267,9 +288,9 @@ async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId:
     c.lookalike = { suspicious: !!(sym?.suspicious || nam?.suspicious), symbol: sym, name: nam };
     if (t.decimals === null || !Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 255) { c.depth = notMeasured('decimals() not read'); return c; }
     c.decimals = t.decimals;
-    const { depth, venues } = await measureDepth(reader, address, t.decimals, sizes);
+    const { depth, venues, blockHash } = await measureDepth(reader, address, t.decimals, sizes);
     c.depth = depth;
-    c.liquidity = await measureLiquidity(reader, chainId, address, depth, venues);
+    c.liquidity = await measureLiquidity(reader, chainId, address, depth, venues, blockHash);
     if (req.xray) {
       const amountIn = depth.rungs.find((r) => r.usdOut !== null)?.amountIn;
       c.xray = amountIn === undefined
@@ -316,7 +337,9 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
 
   const q = skeleton(query);
   const sameTicker = candidates.filter((c) => c.symbol !== null && skeleton(c.symbol) === q).length;
-  const warnings: string[] = [WARNINGS.mostLiquid, WARNINGS.dyor(sameTicker), WARNINGS.notSafety, WARNINGS.liquidityVsDepth, WARNINGS.trust];
+  // Absent is not zero: a symbol not read is counted apart, never as another ticker.
+  const unread = candidates.filter((c) => c.symbol === null && c.hasCode !== false).length;
+  const warnings: string[] = [WARNINGS.mostLiquid, WARNINGS.dyor(sameTicker, unread), WARNINGS.notSafety, WARNINGS.liquidityVsDepth, WARNINGS.trust];
   if (candidates.some((c) => c.liquidity.venues.some((v) => V4_KINDS.includes(v.kind)))) warnings.push(WARNINGS.v4);
   return { query, chainId, candidates, sources: answers.map((a) => a.status), omitted: all.length - picked.length, warnings, basis: BASIS };
 }

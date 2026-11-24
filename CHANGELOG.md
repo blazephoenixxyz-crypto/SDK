@@ -11,6 +11,11 @@
 - Liquidity of Uniswap V4 venues, and of venue kinds whose balances do not sit at their address,
   is `NOT_MEASURED` with its reason, never 0. Fixed warnings: "most liquid" is not "official",
   impostors copy tickers, liquidity is not safety.
+- Every depth size, and the WETH price that values a WETH-paired venue, is read in the block of
+  the price probe (`FindReader.usdValue` takes its `blockHash`); a lost block stops the ladder
+  with its reason. A probe that quotes 0 at one whole token is retried at 10^3 to 10^12 whole
+  tokens. The ticker count is `NOT_MEASURED` when no symbol was read, never 0. An index that
+  stalls its response body fails by name after the same 10 s timeout.
 - `lookalike`, `skeleton`, `visibleText`, `tokenText`: Unicode checks for ticker impostors
   (hidden characters, mixed scripts, Cyrillic, Greek and Armenian letters that look like ASCII,
   compatibility forms).

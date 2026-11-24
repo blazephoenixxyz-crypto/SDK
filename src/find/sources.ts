@@ -20,7 +20,14 @@ const RETRY: RetryOptions = { retries: 1, timeoutMs: 10_000 };
 async function getJson(fetchFn: typeof fetch, url: string): Promise<any> {
   const res = await resilientFetch(fetchFn, url, { headers: { accept: 'application/json' } }, RETRY);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  // resilientFetch stops its timer at the headers: the body gets the same deadline, so an index
+  // that stalls its body fails by name instead of holding the whole lookup.
+  const ms = RETRY.timeoutMs!;
+  const body = res.json();
+  body.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`body not read within ${ms} ms`)), ms); });
+  try { return await Promise.race([body, late]); } finally { clearTimeout(timer); }
 }
 
 const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 200);
