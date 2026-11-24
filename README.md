@@ -327,7 +327,8 @@ never picks one: the result has no `selected` or `best` field, and the choice st
   `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
   (in memory by default; `FileStore` keeps it on disk). A store holds one Hub's index per chain:
   a run refuses a store with another Hub's cursor. One writer per directory and chain: runs in one
-  process wait for each other on any `FileStore` with the same `dir`, but two processes must not
+  process wait for each other on any `FileStore` with the same `dir` string (compared as written,
+  trailing slashes removed: `./idx` and an absolute path to it are two locks), but two processes must not
   update one directory at once. A custom `IndexStore` must make each `append`
   call atomic (all its operations stored or none). `indexStatus` uses the default `smallMax`
   unless you pass the one the index was built with. `r.discovery` says what was covered:
