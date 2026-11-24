@@ -156,7 +156,10 @@ export interface Candidate {
   /** Only with sources 'both'. */
   agreement?: 'both' | 'onchain-only' | 'centralized-only';
   /** The pre-filter measure (bridge balances of its venues, dollar-token base units) for a token the
-   *  on-chain index matched; null when none was measured. */
+   *  on-chain index matched; null when none was measured. A lower bound, never the token's liquidity:
+   *  only venues paired with a bridge token (WETH, the dollar token, the Hub's bridges) whose balances
+   *  sit at their address count, and a venue whose balance, decimals or price was not read adds nothing.
+   *  The depth below is the measure; this only decides which tokens are read. */
   prefilterUsd?: bigint | null;
   hasCode: boolean | null;
   symbol: string | null;

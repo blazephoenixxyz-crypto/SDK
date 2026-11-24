@@ -34,7 +34,8 @@ export interface RunOp {
   factoryCount: number | null;
   v4PoolManager: Address | null;
   bridges: Address[] | null;
-  /** Counter per source at `target` (allPairsLength/allPoolsLength); null where none answered. */
+  /** Counter per source at `target` (allPairsLength/allPoolsLength); null where the factory answered
+   *  that it has none (a revert or no data); no key where it was not measured (absent is not zero). */
   counters: Record<string, number | null>;
   /** Hub reads that did not answer (absent is not zero). */
   failed: string[];
@@ -43,6 +44,10 @@ export interface RunOp {
 export interface FactoryOp { o: 'f'; source: Address; factory: Address; kind: number; mode: number; block: number; logIndex: number }
 export type IndexOp = CursorOp | VenueOp | MalformedOp | TokenOp | DropOp | RunOp | FactoryOp;
 
+/** One index per (store, chain), of one Hub: a run refuses a store that holds another Hub's index.
+ *  `append` must be atomic per call: the ops of one call are all stored or none (a cursor is appended
+ *  with the logs it covers, so a partial append would leave a cursor claiming logs that are missing).
+ *  Two calls need not be atomic together; a run stopped between them resumes from the last one. */
 export interface IndexStore {
   load(chainId: number): Promise<IndexOp[]>;
   append(chainId: number, ops: readonly IndexOp[]): Promise<void>;

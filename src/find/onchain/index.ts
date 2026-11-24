@@ -107,7 +107,8 @@ export const updateIndex = (o: IndexOptions): Promise<Discovery> => run(o, false
 /** Layer 1 and layer 2: every source down to block 0. */
 export const buildIndex = (o: IndexOptions): Promise<Discovery> => run(o, true);
 
-/** What the store holds, without a request. */
+/** What the store holds, without a request. The store does not record the smallMax a run used: pass
+ *  the same one, or a source's `large` flag and `layer2` use the default (SMALL_SOURCE_MAX). */
 export async function indexStatus(o: { chainId: number; store?: IndexStore; smallMax?: number }): Promise<Discovery> {
   const st = materialize(await (o.store ?? defaultStore).load(o.chainId));
   return discovery(st, null, null, o.smallMax ?? SMALL_SOURCE_MAX);
@@ -236,7 +237,12 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
     runOp.v4PoolManager = r[1]?.ok && /^0x0{64}$/i.test(r[1].data) ? ZERO : wordAddress(r[1]);
     const nb = wordNumber(r[2]);
     ['factoryCount', 'v4PoolManager', 'bridgeCount'].forEach((k, i) => { if (!r[i]?.ok || (i !== 1 ? wordNumber(r[i]) : runOp.v4PoolManager) === null) runOp.failed.push(`${k}: ${r[i]?.ok ? 'not one word' : (r[i] as { reason: string }).reason}`); });
-    counted.forEach((f, i) => { runOp.counters[lc(f.factory)] = wordNumber(r[3 + i]); });
+    // A count, or null where the factory answered that it has none (a revert, or no data); a read the
+    // transport failed or that answered something else is left out: not measured, never "no counter".
+    counted.forEach((f, i) => {
+      const x = r[3 + i], n = wordNumber(x);
+      if (n !== null || (x?.ok ? x.data === '0x' : x?.reason === 'reverted')) runOp.counters[lc(f.factory)] = n;
+    });
     if (nb !== null) {
       const br = await callMany(c.m, c.rpc, Array.from({ length: Math.min(nb, 256) }, (_, i) => ({ to: hub, data: `${HUB_CALLS.bridge}${i.toString(16).padStart(64, '0')}` as Hex })), t.target);
       const bridges = br.map(wordAddress);
@@ -369,8 +375,11 @@ function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | nul
   const cov = (source: Address, kind: number, role: Coverage['role']) => {
     const k = st.cursors.get(lc(source));
     const counter = r?.counters[lc(source)] ?? null;
+    // A kind that may have a counter (Slipstream's kind 1) is complete without one only where the
+    // factory answered that it has none: a counter that was not measured is not "none".
+    const noCounter = !COUNTER_REQUIRED.has(kind) && (!COUNTERS[kind]?.length || (!!r && Object.hasOwn(r.counters, lc(source))));
     const valid = !!k && k.from <= k.to;
-    const complete = valid && target !== null && k!.from === 0 && k!.to >= target && k!.malformed === 0 && (counter === null ? !COUNTER_REQUIRED.has(kind) : k!.logs === counter);
+    const complete = valid && target !== null && k!.from === 0 && k!.to >= target && k!.malformed === 0 && (counter === null ? noCounter : k!.logs === counter);
     coverage.push({ source, kind, role, fromBlock: valid ? k!.from : null, toBlock: valid ? k!.to : null, complete, logs: k?.logs ?? 0, malformed: k?.malformed ?? 0, counter, large: !!k?.large || (counter !== null && counter > smallMax) });
   };
   if (r) cov(r.hub, HUB_KIND, 'hub');
@@ -386,7 +395,8 @@ function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | nul
   for (const k of st.byToken.keys()) {
     if (k === ZERO) continue;
     const x = st.tokens.get(k);
-    if (!x) unread++; else if (x.status === 'READ') symbolRead++; else symbolFailed++;
+    // A reading the transport failed measured nothing: it is unread (read again next run), not failed.
+    if (!x || transportFailed(x)) unread++; else if (x.status === 'READ') symbolRead++; else symbolFailed++;
   }
   const seenF = st.factories.size;
   const admitted = r?.factoryCount ?? null;

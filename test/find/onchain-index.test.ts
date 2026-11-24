@@ -499,6 +499,8 @@ test('[vector] a store that holds another Hub\'s index is refused, not mixed; th
 // failed at the transport stays FAILED for ever and its symbol is never found.
 // Mutant: symbols.ts transportFailed `x.status === 'FAILED' && ...includes(CALL_FAILED)` -> `x.status === 'FAILED'` -> the
 // reverting token is read again on every run (one more eth_call).
+// Mutant: index.ts discovery `if (!x || transportFailed(x)) unread++;` -> `if (!x) unread++;` -> tk(1)'s unmeasured text
+// counts as failed (symbolFailed 2, unread 0) and the first run reports complete: true.
 test('[vector] a token whose reads failed at the transport is read again next run; one that reverts is not', async () => {
   const logs = [v2Log(F2, tk(1), tk(2), pair(1), 300)];
   const c = chain({ logs, counters: { [F2]: 1 }, tokens: { [tk(1)]: { symbol: { string: 'GOOD' }, name: { string: 'Good' } }, [tk(2)]: { symbol: 'revert', name: 'revert' } } });
@@ -509,7 +511,9 @@ test('[vector] a token whose reads failed at the transport is read again next ru
     if (down && method === 'eth_call' && JSON.stringify(params).toLowerCase().includes(t1)) throw new Error('503 upstream');
   });
   const d1 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
-  assert.deepEqual(d1.tokens, { known: 2, symbolRead: 0, symbolFailed: 2, unread: 0 });
+  // tk(1)'s text was never measured: it is unread, so the index is not complete until it is read.
+  assert.deepEqual([d1.tokens, d1.complete], [{ known: 2, symbolRead: 0, symbolFailed: 1, unread: 1 }, false]);
+  assert.deepEqual([(await indexStatus({ chainId: CHAIN, store })).tokens.unread, (await indexStatus({ chainId: CHAIN, store })).complete], [1, false]);
   assert.match((await searchIndex({ chainId: CHAIN, store }, tk(1)))[0]?.status ?? '', /FAILED/);
   assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, 'good'), []);
   down = false;
@@ -517,7 +521,7 @@ test('[vector] a token whose reads failed at the transport is read again next ru
   const d2 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
   // One eth_call for the Hub's reads, one for tk(1)'s symbol and name; tk(2) (reverted) is not asked again.
   assert.equal(c.count('eth_call') - calls, 2);
-  assert.deepEqual(d2.tokens, { known: 2, symbolRead: 1, symbolFailed: 1, unread: 0 });
+  assert.deepEqual([d2.tokens, d2.complete], [{ known: 2, symbolRead: 1, symbolFailed: 1, unread: 0 }, true]);
   const m = await searchIndex({ chainId: CHAIN, store }, 'good');
   assert.deepEqual([m.length, m[0]?.status, m[0]?.symbol, m[0]?.readAtBlock], [1, 'READ', 'GOOD', 900]);
   const calls3 = c.count('eth_call');
@@ -618,4 +622,38 @@ test('[vector] a V2 or Solidly factory whose counter does not answer is not comp
   assert.deepEqual([cov(solidly, F5)?.logs, cov(solidly, F5)?.counter, cov(solidly, F5)?.complete, solidly.complete], [0, null, false, false]);
   const empty = await up(chain({ logs: [...logs, factoryLog(HUB, F5, 5, 7)], factoryCount: 3, counters: { [F2]: 1, [F5]: 0 } }), new MemoryStore());
   assert.deepEqual([cov(empty, F5)?.logs, cov(empty, F5)?.counter, cov(empty, F5)?.complete, empty.complete], [0, 0, true, true]);
+});
+
+// Mutant: index.ts discovery `(!!r && Object.hasOwn(r.counters, lc(source)))` -> `true` -> F3's counter, never measured,
+// reads as "no counter" and F3 (and the index) come out complete.
+// Mutant: index.ts body `if (n !== null || (x?.ok ? x.data === '0x' : x?.reason === 'reverted')) runOp.counters[...] = n;`
+// -> `runOp.counters[...] = n;` -> the transport failure is stored as "no counter": complete again.
+// Mutant: index.ts body `x?.reason === 'reverted'` -> `false` -> a V3 factory whose allPoolsLength reverts is never complete.
+// Mutant: index.ts body `x.data === '0x'` -> `false` -> a factory with no code (an empty answer) is never complete.
+test('[vector] a kind-1 (Slipstream) factory whose counter read failed at the transport is not complete; a V3 one that reverts, or has no code, is', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 100), v3Log(F3, tk(3), tk(4), pair(2), 200)];
+  const c = chain({ logs, counters: { [F2]: 1, [F3]: 1 } });
+  const f3 = lc(F3).slice(2);
+  let down = true;
+  const rpc = via(c, (method, params) => {
+    if (down && method === 'eth_call' && JSON.stringify(params).toLowerCase().includes(f3)) throw new Error('503 upstream');
+  });
+  const store = new MemoryStore();
+  const d1 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual([cov(d1, F3)?.logs, cov(d1, F3)?.counter, cov(d1, F3)?.complete, cov(d1, F2)?.complete, d1.complete], [1, null, false, true, false]);
+  const s1 = await indexStatus({ chainId: CHAIN, store });
+  assert.deepEqual([cov(s1, F3)?.complete, s1.complete], [false, false]);
+  down = false;
+  const d2 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual([cov(d2, F3)?.counter, cov(d2, F3)?.complete, d2.complete], [1, true, true]);
+  // A wrong count is not "none" either: 2 counted, 1 seen.
+  const off = await up(chain({ logs, counters: { [F2]: 1, [F3]: 2 } }), new MemoryStore());
+  assert.deepEqual([cov(off, F3)?.counter, cov(off, F3)?.complete, off.complete], [2, false, false]);
+  const reverts = await up(chain({ logs, counters: { [F2]: 1, [F3]: 'revert' } }), new MemoryStore());
+  assert.deepEqual([cov(reverts, F3)?.counter, cov(reverts, F3)?.complete, reverts.complete], [null, true, true]);
+  const noCode = await up(chain({ logs, counters: { [F2]: 1 } }), new MemoryStore());
+  assert.deepEqual([cov(noCode, F3)?.counter, cov(noCode, F3)?.complete, noCode.complete], [null, true, true]);
+  // No Multicall3: no counter was read, so a kind-1 factory is not complete.
+  const noMc = await up(chain({ logs, counters: { [F2]: 1 }, noMulticall: true }), new MemoryStore());
+  assert.deepEqual([cov(noMc, F3)?.counter, cov(noMc, F3)?.complete, noMc.complete], [null, false, false]);
 });

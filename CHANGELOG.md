@@ -25,7 +25,17 @@
 - `updateIndex`, `buildIndex`, `searchIndex`, `indexStatus`, `MemoryStore` and `FileStore` run the
   index on its own; `proposals` is the centralized search alone. A source's `large` flag in
   `discovery.coverage`, and `layer2.pending`, use the `smallMax` the run scanned with, not the
-  default; `indexStatus({ smallMax })` takes it too.
+  default; `indexStatus({ smallMax })` takes it too, and without it uses the default (the store
+  does not record the run's `smallMax`). A store holds one Hub's index per chain: `updateIndex`
+  and `buildIndex` refuse a store that holds another Hub's cursor (they throw; index that Hub in
+  another store). A custom `IndexStore` must make each `append` call atomic.
+- `discovery.complete` is true only when everything was measured: a token whose `symbol()` and
+  `name()` reads failed at the transport counts as `unread` (read again next run), not as failed,
+  and a kind-1 factory (Slipstream has a counter, Uniswap V3 none) is complete without a counter
+  only where the factory answered that it has none (a revert or no data), never after a failed read.
+- `prefilterUsd` is a lower bound of what a token's venues hold in the bridge tokens, not its
+  liquidity: venues paired with other tokens, venues whose balances do not sit at their address,
+  and unread balances add nothing.
 - Liquidity of Uniswap V4 venues, and of venue kinds whose balances do not sit at their address,
   is `NOT_MEASURED` with its reason, never 0. Fixed warnings: "most liquid" is not "official",
   impostors copy tickers, liquidity is not safety.

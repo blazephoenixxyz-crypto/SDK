@@ -42,8 +42,8 @@ export interface FakeChainOptions {
   factoryCount?: number | 'revert';
   v4PoolManager?: Address;
   bridges?: Address[];
-  /** factory (any case) → allPairsLength/allPoolsLength */
-  counters?: Record<string, number>;
+  /** factory (any case) → allPairsLength/allPoolsLength; 'revert' plays a factory with none (Uniswap V3) */
+  counters?: Record<string, number | 'revert'>;
   tokens?: Record<string, FakeToken>;
   /** An answer with more logs than this is an error ("query returned more than N results"). */
   maxLogs?: number;
@@ -126,7 +126,7 @@ export class FakeChain {
       return revert;
     }
     const n = Object.entries(o.counters ?? {}).find(([k]) => lc(k) === lc(to));
-    if (n && (sel === '0x574f2ba3' || sel === '0xefde4e64')) return ok(word(n[1]));
+    if (n && (sel === '0x574f2ba3' || sel === '0xefde4e64')) return n[1] === 'revert' ? revert : ok(word(n[1]));
     const t = Object.entries(o.tokens ?? {}).find(([k]) => lc(k) === lc(to))?.[1];
     if (t && (sel === '0x95d89b41' || sel === '0x06fdde03')) {
       const a = sel === '0x95d89b41' ? t.symbol : t.name;

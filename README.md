@@ -325,7 +325,10 @@ never picks one: the result has no `selected` or `best` field, and the choice st
   called. Layer 1 covers every small source from block 0 and the recent 7-day window of the
   large ones (more than 250,000 creation events); later calls only walk up.
   `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
-  (in memory by default; `FileStore` keeps it on disk). `r.discovery` says what was covered:
+  (in memory by default; `FileStore` keeps it on disk). A store holds one Hub's index per chain:
+  a run refuses a store with another Hub's cursor. A custom `IndexStore` must make each `append`
+  call atomic (all its operations stored or none). `indexStatus` uses the default `smallMax`
+  unless you pass the one the index was built with. `r.discovery` says what was covered:
   the block, each source's range and its count against the on-chain counter, and whether the
   index is complete. When it is not, the first label reads "most liquid of those found"; not
   found in the covered range is not "does not exist". An index that fails is listed in
@@ -333,7 +336,9 @@ never picks one: the result has no `selected` or `best` field, and the choice st
 - **Trust point: your RPC. Found on chain is not endorsed.** Anyone can create a venue: a match
   only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
   venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
-  deepest are counted in the warnings and left out (`includeDust: true` lists them).
+  deepest are counted in the warnings and left out (`includeDust: true` lists them). That
+  measure, `prefilterUsd`, is a lower bound: venues paired with other tokens, venues whose
+  balances do not sit at their address, and unread balances add nothing.
   Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on
   your RPC.
 - **Centralized search: opt-in only.** `sources: 'centralized'` asks the CoinGecko and
