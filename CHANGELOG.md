@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — findToken (`@blazephoenix/sdk/find`)
+
+- `findToken({ query, chainId, rpc })`: candidates for a name or ticker, proposed by the
+  CoinGecko and Dexscreener public search (third-party indexes, the trust point; a failed index
+  is listed in `sources` with its error) and read on your RPC: code, symbol, name, decimals,
+  depth at 1% and 5% impact over a ladder of USD sizes (a lower bound), and the balances of the
+  venues on the measured route. Ranked by measured depth; the first is labelled "most liquid",
+  never "official", and nothing is selected.
+- Liquidity of Uniswap V4 venues, and of venue kinds whose balances do not sit at their address,
+  is `NOT_MEASURED` with its reason, never 0. Fixed warnings: "most liquid" is not "official",
+  impostors copy tickers, liquidity is not safety.
+- `lookalike`, `skeleton`, `visibleText`, `tokenText`: Unicode checks for ticker impostors
+  (hidden characters, mixed scripts, Cyrillic, Greek and Armenian letters that look like ASCII,
+  compatibility forms).
+- Optional X-Ray per candidate (`xray: { transport }`), off by default.
+
 ## 1.7.0 — quoted USD prices, on one chain and across chains
 
 Some of these functions are already prepared for the V2 DEX and the V4 staking engine;
