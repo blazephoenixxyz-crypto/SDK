@@ -6,11 +6,11 @@ import type { Address, Hex } from 'viem';
 import { EMBEDDED_DEPLOYMENTS, isZero } from '../../deployments.js';
 import type { RpcSource } from '../../rpc.js';
 import { skeleton } from '../../text.js';
-import { COUNTERS, CREATION_EVENTS, HUB_CALLS } from './kinds.js';
+import { COUNTER_REQUIRED, COUNTERS, CREATION_EVENTS, HUB_CALLS } from './kinds.js';
 import { chainRpc, getBlock, Meter, MeterStop, resolveTarget, toHex, why, type ChainRpc, type StopReason, type Target } from './rpc.js';
 import { getLogs, HUB_KIND, cursorOp, opsOf, walk, type Source, type WalkResult } from './scan.js';
 import { defaultStore, materialize, type Cursor, type IndexOp, type IndexState, type IndexStore, type RunOp } from './store.js';
-import { callMany, MULTICALL3, readTexts, wordAddress, wordNumber, type Call } from './symbols.js';
+import { callMany, MULTICALL3, readTexts, transportFailed, wordAddress, wordNumber, type Call } from './symbols.js';
 
 /** A source with more creation events than this is large: layer 1 covers only its recent window. */
 export const SMALL_SOURCE_MAX = 250_000;
@@ -157,9 +157,12 @@ function note(c: Ctx, what: string, r: WalkResult) {
   else if (r.stop === 'error') c.errors.push(`${what}: block ${r.at}: ${r.error}`);
 }
 
+// Every worker settles before the first failure is thrown: a worker still running would append after run released the lock.
 async function inParallel<T>(items: readonly T[], n: number, f: (x: T) => Promise<void>) {
   let i = 0;
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, async () => { while (i < items.length) await f(items[i++]); }));
+  const r = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, async () => { while (i < items.length) await f(items[i++]); }));
+  const failed = r.find((x): x is PromiseRejectedResult => x.status === 'rejected');
+  if (failed) throw failed.reason;
 }
 
 async function run(o: IndexOptions, layer2: boolean): Promise<Discovery> {
@@ -168,6 +171,9 @@ async function run(o: IndexOptions, layer2: boolean): Promise<Discovery> {
     const hub = o.hub ?? liveHub(o.chainId);
     if (!hub) throw new Error(`no live Hub for chain ${o.chainId}: pass opts.hub`);
     const c: Ctx = { o, chainId: o.chainId, rpc: chainRpc(o.rpc), m: new Meter(o.maxRequests, o.budgetMs, o.now), all: await store.load(o.chainId), q: Promise.resolve(), store, errors: [], stopped: null };
+    // One Hub per (store, chain): another Hub's Factory_ logs would be taken as this Hub's factories.
+    const other = c.all.find((x) => x.o === 'c' && x.kind === HUB_KIND && lc(x.source) !== lc(hub));
+    if (other) throw new Error(`the store holds the index of Hub ${lc((other as { source: string }).source)} on chain ${o.chainId}: index Hub ${hub} in another store`);
     let t: Target | null = null;
     try {
       t = await resolveTarget(c.m, c.rpc, o.confirmations ?? CONFIRMATIONS);
@@ -247,6 +253,9 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
   const seen = new Set<string>();
   for (const f of factories) if (SCANNED_KINDS.has(f.kind) && !seen.has(lc(f.factory))) { seen.add(lc(f.factory)); sources.push({ address: f.factory, kind: f.kind }); }
   if (runOp.v4PoolManager && !isZero(runOp.v4PoolManager) && !seen.has(lc(runOp.v4PoolManager))) sources.push({ address: runOp.v4PoolManager, kind: 4 });
+  // A source re-listed under another kind: what the old kind's filter found goes, and it is scanned anew from the target.
+  const relisted = sources.filter((s) => { const k = st.cursors.get(lc(s.address)); return !!k && k.kind !== s.kind; });
+  await append(c, relisted.flatMap((s): IndexOp[] => [{ o: 'd', source: s.address, after: -1 }, cursorOp(s, t.target + 1, t.target, t.hash, false)]));
 
   // 6. Large or small: the counter decides; without one, the logs seen so far (and found during the walk).
   st = materialize(c.all);
@@ -278,7 +287,8 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
   // 7. symbol() and name() of every token with no reading yet, in lots stored one by one.
   if (!multicall) return;
   st = materialize(c.all);
-  const unread = [...st.byToken.keys()].filter((k) => !st.tokens.has(k) && k !== ZERO) as Address[];
+  // A reading the transport failed is absent, not a value: it is read again; a revert or a non-string stays.
+  const unread = [...st.byToken.keys()].filter((k) => { const x = st.tokens.get(k); return k !== ZERO && (!x || transportFailed(x)); }) as Address[];
   for (let i = 0; i < unread.length; i += SYMBOL_LOT) {
     const texts = await readTexts(c.m, c.rpc, unread.slice(i, i + SYMBOL_LOT), t.target);
     await append(c, texts.map((x) => ({ o: 'k' as const, ...x })));
@@ -291,6 +301,15 @@ async function scanSources(
   c: Ctx, t: Target, sources: readonly Source[], floorOf: (s: Source) => number, smallMax: number, span: number | undefined, conc: number,
   large: Set<string> = new Set(), recentFloor: (() => Promise<number>) | null = null,
 ) {
+  // A cursor above the target (the node's finalized block went back below a stored tip) is cut to the
+  // target, so nothing above asOfBlock stays searchable. Every cursor, not only these sources: a factory
+  // whose Factory_ log goes with the Hub's cut would otherwise keep its venues in the store.
+  const cut: IndexOp[] = [];
+  for (const k of materialize(c.all).cursors.values()) {
+    if (k.from > k.to || k.to <= t.target) continue;
+    cut.push({ o: 'd', source: k.source, after: t.target }, cursorOp({ address: k.source, kind: k.kind }, Math.min(k.from, t.target + 1), t.target, t.hash, k.large));
+  }
+  await append(c, cut);
   const st = materialize(c.all);
   const cur = (s: Source): Cursor | undefined => st.cursors.get(lc(s.address));
   // Up: sources sharing a tip below the target share every getLogs.
@@ -351,7 +370,7 @@ function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | nul
     const k = st.cursors.get(lc(source));
     const counter = r?.counters[lc(source)] ?? null;
     const valid = !!k && k.from <= k.to;
-    const complete = valid && target !== null && k!.from === 0 && k!.to >= target && k!.malformed === 0 && (counter === null || k!.logs === counter);
+    const complete = valid && target !== null && k!.from === 0 && k!.to >= target && k!.malformed === 0 && (counter === null ? !COUNTER_REQUIRED.has(kind) : k!.logs === counter);
     coverage.push({ source, kind, role, fromBlock: valid ? k!.from : null, toBlock: valid ? k!.to : null, complete, logs: k?.logs ?? 0, malformed: k?.malformed ?? 0, counter, large: !!k?.large || (counter !== null && counter > smallMax) });
   };
   if (r) cov(r.hub, HUB_KIND, 'hub');
@@ -373,11 +392,14 @@ function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | nul
   const admitted = r?.factoryCount ?? null;
   const match = admitted !== null && seenF === admitted;
   const large = coverage.filter((x) => x.large);
+  // The target is the stored snapshot's (the one asOfBlock and complete speak of): a target this run
+  // resolved but never stored a RunOp for is not reported.
+  const sameRun = !!t && !!r && t.target === r.target && lc(t.hash) === lc(r.hash);
   const out: Discovery = {
     mode: 'onchain',
     asOfBlock: target,
     complete: !!r && match && coverage.length > 0 && coverage.every((x) => x.complete) && notCovered.length === 0 && unread === 0 && r.failed.length === 0,
-    target: t ? { head: t.head, target: t.target, hash: t.hash, by: t.by, confirmations: t.confirmations, unindexedTail: t.unindexedTail } : r ? { head: r.head, target: r.target, hash: r.hash, by: r.by, confirmations: 0, unindexedTail: r.head - r.target } : null,
+    target: sameRun ? { head: t.head, target: t.target, hash: t.hash, by: t.by, confirmations: t.confirmations, unindexedTail: t.unindexedTail } : r ? { head: r.head, target: r.target, hash: r.hash, by: r.by, confirmations: 0, unindexedTail: r.head - r.target } : null,
     coverage,
     factories: { admitted, seen: seenF, match },
     tokens: { known: symbolRead + symbolFailed + unread, symbolRead, symbolFailed, unread },

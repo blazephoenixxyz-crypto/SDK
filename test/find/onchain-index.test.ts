@@ -8,7 +8,7 @@
 // Fresh MemoryStore per test, explicit hub, no network. Each test names the mutant that turns it red.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeFunctionData, parseAbi, type Address, type Hex } from 'viem';
+import { decodeFunctionData, getAddress, parseAbi, type Address, type Hex } from 'viem';
 import { buildIndex, indexStatus, searchIndex, updateIndex, type Discovery, type IndexOptions } from '../../src/find/onchain/index.js';
 import { HUB_KIND } from '../../src/find/onchain/scan.js';
 import { materialize, MemoryStore, type CursorOp, type IndexOp, type IndexStore } from '../../src/find/onchain/store.js';
@@ -444,4 +444,178 @@ test('[fuzz] runs cut at any request cap resume to the same index as one uncappe
     }
   }
   assert.equal((await searchIndex({ chainId: CHAIN, store: (await (async () => { const s = new MemoryStore(); await up(fixtures[0][1](), s); return s; })()) }, 'seven'))[0]?.status, 'READ');
+});
+
+/** The fake behind a hook: `hook` may throw or delay a request before the fake answers it. */
+const via = (c: FakeChain, hook: (method: string, params: unknown[]) => Promise<void> | void) =>
+  ({ request: async (a: { method: string; params?: unknown[] }) => { await hook(a.method, a.params ?? []); return c.request(a); } });
+const getLogsOf = (params: unknown[]) => [(params[0] as { address: string | string[] }).address].flat().map(lc);
+
+// Mutant: index.ts inParallel `Promise.allSettled(` and the rethrow -> `Promise.all(` -> updateIndex resolves while F2's
+// walk down still has a getLogs in flight, and its venue and cursor land in the store after the lock is released.
+test('[vector] a walk down that throws (recent floor unreadable) does not release the store while another walk still writes', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 300), ...[400, 410, 420].map((b, i) => v3Log(F3, tk(10 + 2 * i), tk(11 + 2 * i), pair(10 + i), b))];
+  const c = chain({ logs, counters: { [F2]: 1 } });
+  const store = new MemoryStore();
+  // F3 (no counter) is found large on its walk down, so the recent floor is measured there: block 0 fails.
+  // F2's getLogs answers 50 ms late, after F3's walk has thrown.
+  const rpc = via(c, async (method, params) => {
+    if (method === 'eth_getBlockByNumber' && params[0] === '0x0') throw new Error('block 0: timeout');
+    if (method === 'eth_getLogs' && getLogsOf(params).includes(lc(F2))) await new Promise((r) => setTimeout(r, 50));
+  });
+  const d = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB, smallMax: 2 });
+  const atReturn = (await store.load(CHAIN)).length;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal((await store.load(CHAIN)).length, atReturn);
+  assert.match(d.run!.errors.join('\n'), /block 0: timeout/);
+  assert.equal(cov(d, F2)?.logs, 1);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(1))).length, 1);
+});
+
+// Mutant: index.ts `x.o === 'c' && x.kind === HUB_KIND && lc(x.source) !== lc(hub)` -> `false` -> the run for Hub B
+// takes Hub A's factory F2 as one of B's: F2 and its venue come back as B's, and seen 2 against B's factoryCount() 1.
+// Mutant: index.ts `lc(x.source) !== lc(hub)` -> `x.source !== hub` -> the same Hub in its checksummed case is refused.
+test('[vector] a store that holds another Hub\'s index is refused, not mixed; the same Hub in any case resumes', async () => {
+  // Addresses with hex letters, so that the case of the Hub's address is a real difference.
+  const HUB_A = addr(0xabcd), HUB_B = addr(0xbcde);
+  const a = new FakeChain({ head: 1000, finalized: 900, hub: HUB_A, factoryCount: 1, counters: { [F2]: 1 }, logs: [factoryLog(HUB_A, F2, 0, 5), v2Log(F2, tk(1), tk(2), pair(1), 300)] });
+  const store = new MemoryStore();
+  assert.equal((await updateIndex({ chainId: CHAIN, rpc: a, store, hub: HUB_A })).complete, true);
+  const before = (await store.load(CHAIN)).length;
+  const b = new FakeChain({ head: 1000, finalized: 900, hub: HUB_B, factoryCount: 1, logs: [factoryLog(HUB_B, F4, 1, 5), v3Log(F4, tk(3), tk(4), pair(2), 300)] });
+  await assert.rejects(updateIndex({ chainId: CHAIN, rpc: b, store, hub: HUB_B }), (e: Error) => e.message.includes(HUB_A) && e.message.includes(HUB_B));
+  assert.equal(b.calls.length, 0);
+  assert.equal((await store.load(CHAIN)).length, before);
+  const checksummed = getAddress(HUB_A);
+  assert.notEqual(checksummed, HUB_A);
+  const d = await updateIndex({ chainId: CHAIN, rpc: a, store, hub: checksummed });
+  assert.equal(d.complete, true);
+  // Another store is a fresh namespace: Hub B indexes alone there.
+  const db = await updateIndex({ chainId: CHAIN, rpc: b, store: new MemoryStore(), hub: HUB_B });
+  assert.deepEqual([db.factories, db.coverage.map((x) => lc(x.source))], [{ admitted: 1, seen: 1, match: true }, [lc(HUB_B), lc(F4)]]);
+});
+
+// Mutant: index.ts `return k !== ZERO && (!x || transportFailed(x));` -> `return k !== ZERO && !x;` -> the token whose reads
+// failed at the transport stays FAILED for ever and its symbol is never found.
+// Mutant: symbols.ts transportFailed `x.status === 'FAILED' && ...includes(CALL_FAILED)` -> `x.status === 'FAILED'` -> the
+// reverting token is read again on every run (one more eth_call).
+test('[vector] a token whose reads failed at the transport is read again next run; one that reverts is not', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 300)];
+  const c = chain({ logs, counters: { [F2]: 1 }, tokens: { [tk(1)]: { symbol: { string: 'GOOD' }, name: { string: 'Good' } }, [tk(2)]: { symbol: 'revert', name: 'revert' } } });
+  const store = new MemoryStore();
+  const t1 = lc(tk(1)).slice(2);
+  let down = true;
+  const rpc = via(c, (method, params) => {
+    if (down && method === 'eth_call' && JSON.stringify(params).toLowerCase().includes(t1)) throw new Error('503 upstream');
+  });
+  const d1 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual(d1.tokens, { known: 2, symbolRead: 0, symbolFailed: 2, unread: 0 });
+  assert.match((await searchIndex({ chainId: CHAIN, store }, tk(1)))[0]?.status ?? '', /FAILED/);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, 'good'), []);
+  down = false;
+  const calls = c.count('eth_call');
+  const d2 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  // One eth_call for the Hub's reads, one for tk(1)'s symbol and name; tk(2) (reverted) is not asked again.
+  assert.equal(c.count('eth_call') - calls, 2);
+  assert.deepEqual(d2.tokens, { known: 2, symbolRead: 1, symbolFailed: 1, unread: 0 });
+  const m = await searchIndex({ chainId: CHAIN, store }, 'good');
+  assert.deepEqual([m.length, m[0]?.status, m[0]?.symbol, m[0]?.readAtBlock], [1, 'READ', 'GOOD', 900]);
+  const calls3 = c.count('eth_call');
+  await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.equal(c.count('eth_call') - calls3, 1);
+});
+
+// Mutant: index.ts `return !!k && k.kind !== s.kind;` -> `return false;` -> F2 keeps its kind-0 cursor: the V3 venue it made
+// before the refresh is never scanned and its kind-0 pair stays searchable.
+// Mutant: index.ts `[{ o: 'd', source: s.address, after: -1 }, cursorOp(` -> `[cursorOp(` -> the rescan covers block 300 again
+// and the kind-0 pair found by the old filter stays searchable.
+test('[vector] a factory the Hub re-lists under another kind is scanned again from block 0 with the new kind; the old kind\'s venues go', async () => {
+  const c = new FakeChain({ head: 1000, finalized: 900, hub: HUB, factoryCount: 1, logs: [
+    factoryLog(HUB, F2, 0, 5), v2Log(F2, tk(1), tk(2), pair(1), 300), v3Log(F2, tk(3), tk(4), pair(2), 310),
+  ] });
+  const store = new MemoryStore();
+  const d1 = await up(c, store);
+  assert.deepEqual(d1.coverage.map((x) => [lc(x.source), x.kind, x.logs]), [[lc(HUB), HUB_KIND, 1], [lc(F2), 0, 1]]);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(1))).length, 1);
+  c.logs.push(factoryLog(HUB, F2, 1, 950));
+  c.finalized = 1000;
+  c.head = 1100;
+  const d2 = await up(c, store);
+  assert.deepEqual(d2.coverage.map((x) => [lc(x.source), x.kind, x.fromBlock, x.toBlock, x.logs]), [[lc(HUB), HUB_KIND, 0, 1000, 2], [lc(F2), 1, 0, 1000, 1]]);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, tk(1)), []);
+  const v = (await searchIndex({ chainId: CHAIN, store }, tk(3)))[0]?.venues;
+  assert.deepEqual(v?.map((x) => [x.kind, x.block]), [[1, 310]]);
+  assert.equal(d2.factories.match, true);
+  // Same kind next run: no rescan from block 0.
+  c.finalized = 1050;
+  c.head = 1150;
+  const n = c.getLogsRanges().length;
+  await up(c, store);
+  assert.ok(c.getLogsRanges().slice(n).every(([lo]) => lo > 1000));
+});
+
+// Mutant: index.ts scanSources `if (k.from > k.to || k.to <= t.target) continue;` -> `if (true) continue;` -> the venues at
+// blocks 940 and 950 stay searchable next to asOfBlock 900.
+// Mutant: index.ts scanSources `for (const k of st.cursors.values())` -> only the cursors of `sources` -> F5, whose Factory_
+// log (block 930) went with the Hub's cut, keeps its venue at 940 searchable.
+test('[vector] a finalized block below the stored tip: every cursor is cut to the new target, nothing above asOfBlock stays searchable', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 100), v2Log(F2, tk(3), tk(4), pair(2), 950), factoryLog(HUB, F5, 0, 930), v2Log(F5, tk(7), tk(8), pair(3), 940)];
+  const c = chain({ logs, finalized: 960, factoryCount: 3, counters: { [F2]: 2, [F5]: 1 } });
+  const store = new MemoryStore();
+  const d1 = await up(c, store);
+  assert.deepEqual([d1.asOfBlock, cov(d1, F2)?.toBlock, cov(d1, F5)?.toBlock, d1.complete], [960, 960, 960, true]);
+  // The node now answers a lower finalized block; block 960 keeps its hash, so the tip check rolls nothing back.
+  c.finalized = 900;
+  c.o.factoryCount = 2;
+  c.o.counters = { [F2]: 1 };
+  const d2 = await up(c, store);
+  assert.equal(d2.asOfBlock, 900);
+  assert.deepEqual(d2.coverage.map((x) => x.toBlock), d2.coverage.map(() => 900));
+  assert.deepEqual([cov(d2, F2)?.logs, cov(d2, F5), d2.complete], [1, undefined, true]);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, tk(1))).length, 1);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, tk(3)), []);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, tk(7)), []);
+  const st = materialize(await store.load(CHAIN));
+  assert.ok([...st.cursors.values()].every((k) => k.to <= 900), 'no cursor above the target');
+  // Back above: the cut range is walked up again.
+  c.finalized = 960;
+  c.o.factoryCount = 3;
+  c.o.counters = { [F2]: 2, [F5]: 1 };
+  const d3 = await up(c, store);
+  assert.deepEqual([d3.asOfBlock, cov(d3, F2)?.logs, cov(d3, F5)?.logs, d3.complete], [960, 2, 1, true]);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(7))).length, 1);
+});
+
+// Mutant: index.ts discovery `const sameRun = !!t && !!r && t.target === r.target && lc(t.hash) === lc(r.hash);` ->
+// `const sameRun = !!t;` -> a run stopped before its RunOp reports target 950 with asOfBlock 900.
+test('[unit] the reported target is the stored snapshot\'s: a run stopped before its Hub reads reports asOfBlock and target of the same block', async () => {
+  const c = chain();
+  const store = new MemoryStore();
+  const d0 = await up(c, new MemoryStore(), { maxRequests: 2 });
+  assert.deepEqual([d0.run?.stopped, d0.asOfBlock, d0.target], ['requests', null, null]);
+  const d1 = await up(c, store);
+  assert.deepEqual([d1.asOfBlock, d1.target?.target, d1.target?.hash, d1.target?.confirmations], [900, 900, c.hashOf(900), 64]);
+  c.finalized = 950;
+  // blockNumber, finalized, the tip, then getCode: the run stops at the Hub's walk, before its RunOp.
+  const d2 = await up(c, store, { maxRequests: 4 });
+  assert.equal(d2.run?.stopped, 'requests');
+  assert.deepEqual([d2.asOfBlock, d2.target?.target, d2.target?.hash], [900, 900, c.hashOf(900)]);
+  const d3 = await up(c, store);
+  assert.deepEqual([d3.asOfBlock, d3.target?.target, d3.target?.hash, d3.target?.by], [950, 950, c.hashOf(950), 'finalized']);
+});
+
+// Mutant: index.ts cov `(counter === null ? !COUNTER_REQUIRED.has(kind) : k!.logs === counter)` -> `(counter === null || k!.logs === counter)`
+// -> a V2 factory whose allPairsLength() does not answer is complete.
+// Mutant: kinds.ts `COUNTER_REQUIRED = new Set([0, 5])` -> `new Set([0])` -> a Solidly factory without a count is complete.
+test('[vector] a V2 or Solidly factory whose counter does not answer is not complete; a V3 factory with none, and a count of 0, still are', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 100), v3Log(F3, tk(3), tk(4), pair(2), 200)];
+  const d = await up(chain({ logs, counters: {} }), new MemoryStore());
+  assert.deepEqual([cov(d, F2)?.logs, cov(d, F2)?.counter, cov(d, F2)?.complete, d.complete], [1, null, false, false]);
+  assert.deepEqual([cov(d, F3)?.logs, cov(d, F3)?.counter, cov(d, F3)?.complete], [1, null, true]);
+  const counted = await up(chain({ logs, counters: { [F2]: 1 } }), new MemoryStore());
+  assert.deepEqual([cov(counted, F2)?.complete, counted.complete], [true, true]);
+  const solidly = await up(chain({ logs: [...logs, factoryLog(HUB, F5, 5, 7)], factoryCount: 3, counters: { [F2]: 1 } }), new MemoryStore());
+  assert.deepEqual([cov(solidly, F5)?.logs, cov(solidly, F5)?.counter, cov(solidly, F5)?.complete, solidly.complete], [0, null, false, false]);
+  const empty = await up(chain({ logs: [...logs, factoryLog(HUB, F5, 5, 7)], factoryCount: 3, counters: { [F2]: 1, [F5]: 0 } }), new MemoryStore());
+  assert.deepEqual([cov(empty, F5)?.logs, cov(empty, F5)?.counter, cov(empty, F5)?.complete, empty.complete], [0, 0, true, true]);
 });

@@ -37,6 +37,8 @@ export const COUNTERS: Readonly<Record<number, readonly Hex[]>> = {
   1: ['0xefde4e64'], // allPoolsLength() (Slipstream; Uniswap V3 has none and reverts)
   5: ['0xefde4e64'], // allPoolsLength()
 };
+/** Kinds whose every factory has a counter: one that does not answer is an absent measurement, never a match. */
+export const COUNTER_REQUIRED: ReadonlySet<number> = new Set([0, 5]);
 
 /** The Hub's `Factory_(address indexed factory, uint8 kind, uint8 mode)`: the set of factories to scan. */
 export const FACTORY_EVENT = {

@@ -200,6 +200,23 @@ test('[vector] a token with no measure (no bridge venue) is kept, queued last: a
   assert.equal(cut.omitted, 1);
 });
 
+// Mutant: floorAndQueue ignores prefilterPartial (prefilter.ts `below`) -> the partly read token is dropped as dust.
+// A partial sum is a lower bound: one venue read, the other not. Below the floor it proves nothing.
+test('[vector] a token whose venue reads partly failed is kept: a partial sum is not floored (absent is not zero)', async () => {
+  const toks: Tok[] = [{ n: 1, usdcBalance: 1_000_000n, depthUsd: 100_000n }, { n: 3, usdcBalance: 999n, depthUsd: 1_000n }];
+  // tk(3) also has a WETH venue whose balanceOf fails on the node (Erc20Chain: no WETH balance).
+  const extra = v2Log(F2, tk(3), WETH, pair(33), 110, 0, 3);
+  const r = await find(world(toks, { logs: [extra], counters: { [F2]: 3 } }));
+  const x = r.candidates.find((c) => c.address === tk(3));
+  assert.ok(x, 'kept: its unread venue may hold the depth');
+  assert.equal(x!.prefilterUsd, 999n, 'the measure is still what was read');
+  assert.equal(r.discovery!.belowFloor, 0);
+  // Control: the same token fully read at 999 falls (see the floor test above).
+  const full = await find(world(toks));
+  assert.ok(!full.candidates.some((c) => c.address === tk(3)));
+  assert.equal(full.discovery!.belowFloor, 1);
+});
+
 // Mutant: final order by prefilterUsd instead of the Quoter depth -> the big-balance shallow token ranks first.
 test('[vector] homonym flood: 20 dust impostors left out, a big-balance shallow one does not outrank the deep token', async () => {
   const toks: Tok[] = [

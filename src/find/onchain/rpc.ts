@@ -1,7 +1,7 @@
 // The few JSON-RPC calls the index makes, on the caller's RPC, with a request meter (a count cap
 // and a time budget) checked before every request. Nothing here ever calls fetch on its own.
 import type { Hex } from 'viem';
-import { transportFrom, type RpcSource } from '../../rpc.js';
+import { scrubUrls, transportFrom, type RpcSource } from '../../rpc.js';
 
 export interface ChainRpc {
   request(args: { method: string; params?: unknown[] }): Promise<unknown>;
@@ -42,7 +42,8 @@ export class MeterStop extends Error {
 }
 
 export const toHex = (n: number): Hex => `0x${n.toString(16)}`;
-export const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 200);
+/** An error as text for results and the store: URLs redacted (a transport quotes its URL, key and all), then capped. */
+export const why = (e: unknown) => scrubUrls(e instanceof Error ? e.message : String(e)).slice(0, 200);
 
 export interface BlockRef { number: number; hash: Hex; timestamp: number }
 
@@ -51,7 +52,7 @@ export async function getBlock(m: Meter, rpc: ChainRpc, tag: number | 'finalized
   if (!b || typeof b.number !== 'string' || typeof b.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(b.hash)) return null;
   const number = parseInt(b.number, 16);
   const timestamp = typeof b.timestamp === 'string' ? parseInt(b.timestamp, 16) : NaN;
-  if (!Number.isSafeInteger(number)) return null;
+  if (!Number.isSafeInteger(number) || (typeof tag === 'number' && number !== tag)) return null;
   return { number, hash: b.hash.toLowerCase() as Hex, timestamp };
 }
 

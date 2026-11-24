@@ -1,7 +1,8 @@
 // The index is an append-only list of operations per chain. The state is DERIVED from it (one
 // producer): a log count is the number of distinct venues a source holds, never a stored number.
 // Venues are written before the cursor that covers them, in one append: a crash between two appends
-// leaves a cursor that claims nothing it did not scan.
+// leaves a cursor that claims nothing it did not scan. FileStore writes an append as one line, so a
+// crash inside it loses the whole chunk, never its cursor alone.
 import type { Address, Hex } from 'viem';
 
 export interface CursorOp {
@@ -60,8 +61,9 @@ export class MemoryStore implements IndexStore {
 
 export const defaultStore: IndexStore = new MemoryStore();
 
-/** Node only: `<dir>/<chainId>.jsonl`, one operation per line. node:fs is imported on first use, so
- *  a browser bundle never needs it. A torn last line (a crash mid-write) is ignored on load. */
+/** Node only: `<dir>/<chainId>.jsonl`, one append per line (a JSON array of its operations; a line
+ *  holding one operation object is read too). node:fs is imported on first use, so a browser bundle
+ *  never needs it. A torn last line (a crash mid-write) is ignored on load: its chunk is all or nothing. */
 export class FileStore implements IndexStore {
   constructor(readonly dir: string) {}
   private path(chainId: number) { return `${this.dir.replace(/\/+$/, '')}/${chainId}.jsonl`; }
@@ -72,7 +74,9 @@ export class FileStore implements IndexStore {
     const out: IndexOp[] = [];
     for (const line of text.split('\n')) {
       if (!line) continue;
-      try { out.push(JSON.parse(line) as IndexOp); } catch { /* torn line */ }
+      let v: IndexOp | IndexOp[];
+      try { v = JSON.parse(line) as IndexOp | IndexOp[]; } catch { continue; /* torn line */ }
+      if (Array.isArray(v)) out.push(...v); else out.push(v);
     }
     return out;
   }
@@ -85,7 +89,7 @@ export class FileStore implements IndexStore {
     const torn = await fs.open(p, 'r').then(async (h) => {
       try { const { size } = await h.stat(); if (size === 0) return false; const b = new Uint8Array(1); await h.read(b, 0, 1, size - 1); return b[0] !== 0x0a; } finally { await h.close(); }
     }, (e: { code?: string }) => { if (e.code === 'ENOENT') return false; throw e; });
-    await fs.appendFile(p, (torn ? '\n' : '') + ops.map((o) => JSON.stringify(o)).join('\n') + '\n', 'utf8');
+    await fs.appendFile(p, (torn ? '\n' : '') + JSON.stringify(ops) + '\n', 'utf8');
   }
 }
 

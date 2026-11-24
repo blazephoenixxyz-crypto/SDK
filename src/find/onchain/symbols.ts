@@ -11,6 +11,8 @@ const SYMBOL: Hex = '0x95d89b41';
 const NAME: Hex = '0x06fdde03';
 const MC_ABI = parseAbi(['struct Call3 { address target; bool allowFailure; bytes callData; }', 'struct Result { bool success; bytes returnData; }', 'function aggregate3(Call3[] calls) payable returns (Result[] returnData)']);
 
+/** The reason of a call the transport failed (every try), as opposed to a revert: the one producer of it. */
+export const CALL_FAILED = 'call failed: ';
 export interface Call { to: Address; data: Hex }
 export type CallResult = { ok: true; data: Hex } | { ok: false; reason: string };
 
@@ -28,7 +30,7 @@ export async function callMany(m: Meter, rpc: ChainRpc, calls: readonly Call[], 
       try { res = await aggregate(m, rpc, calls.slice(a, b), block); } catch (e) { if (e instanceof MeterStop) throw e; err = why(e); }
     }
     if (res) { res.forEach((r, i) => { out[a + i] = r; }); continue; }
-    if (b - a === 1) { out[a] = { ok: false, reason: `call failed: ${err}` }; continue; }
+    if (b - a === 1) { out[a] = { ok: false, reason: `${CALL_FAILED}${err}` }; continue; }
     const mid = a + Math.ceil((b - a) / 2);
     lots.unshift([a, mid], [mid, b]);
   }
@@ -91,6 +93,9 @@ export function textOf(token: Address, sym: CallResult, nam: CallResult, block: 
     ks: s === null ? null : skeleton(s), kn: n === null ? null : skeleton(n), readAtBlock: block,
   };
 }
+
+/** A FAILED reading where symbol() or name() never answered (the transport failed): nothing was measured. */
+export const transportFailed = (x: { status: string; reason?: string }): boolean => x.status === 'FAILED' && !!x.reason?.includes(CALL_FAILED);
 
 /** symbol() and name() of each token at `block`, two subcalls per token. */
 export async function readTexts(m: Meter, rpc: ChainRpc, tokens: readonly Address[], block: number, maxPerLot = MAX_SUBCALLS): Promise<TokenText[]> {

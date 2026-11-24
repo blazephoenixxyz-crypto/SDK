@@ -7,12 +7,12 @@
 // Each test names the mutant of src/find/onchain that turns it red.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decodeFunctionData, encodeAbiParameters, encodeFunctionResult, keccak256, parseAbi, toBytes, type Address, type Hex } from 'viem';
 import { blockOf, COUNTERS, CREATION_EVENTS, decodeCreation, FACTORY_EVENT, HUB_CALLS, type RawLog } from '../../src/find/onchain/kinds.js';
-import { getBlock, Meter, MeterStop, resolveTarget, type ChainRpc } from '../../src/find/onchain/rpc.js';
+import { getBlock, Meter, MeterStop, resolveTarget, why, type ChainRpc } from '../../src/find/onchain/rpc.js';
 import { getLogs, HUB_KIND, ONE_BLOCK_RETRIES, opsOf, walk, type Source } from '../../src/find/onchain/scan.js';
 import { callMany, decodeText, MAX_SUBCALLS, MULTICALL3, readTexts, textOf, wordAddress, wordNumber, type Call } from '../../src/find/onchain/symbols.js';
 import { FileStore, materialize, MemoryStore, type IndexOp } from '../../src/find/onchain/store.js';
@@ -203,6 +203,38 @@ test('[range] without a finalized tag the target is head - confirmations, floore
   await assert.rejects(resolveTarget(new Meter(), shortHash, 64), /returned no block/);
   // A stop of the meter while asking 'finalized' is a stop, not "no finalized tag".
   await assert.rejects(resolveTarget(new Meter(1), chain, 64), (e) => e instanceof MeterStop);
+});
+
+// Mutant: getBlock drops `number !== tag` (rpc.ts) -> block 935's hash anchors a target reported as 936.
+test('[vector] a node that answers a numeric block tag with another height gives no block, not its hash', async () => {
+  const chain = new FakeChain({ head: 1000, finalized: null });
+  const offByOne: ChainRpc = { request: async (a) => {
+    if (a.method !== 'eth_getBlockByNumber' || typeof a.params?.[0] !== 'string' || !/^0x/.test(a.params[0] as string)) return chain.request(a);
+    return chain.request({ method: a.method, params: [hex(parseInt(a.params[0] as string, 16) - 1), false] });
+  } };
+  assert.equal(await getBlock(new Meter(), offByOne, 936), null);
+  await assert.rejects(resolveTarget(new Meter(), offByOne, 64), /block 936: the node returned no block/);
+  // Control: the honest node at the same height.
+  assert.deepEqual(await getBlock(new Meter(), chain, 936), { number: 936, hash: chain.hashOf(936), timestamp: 1_700_000_000 + 1872 });
+});
+
+// Mutant: `why` without scrubUrls (rpc.ts) -> the RPC key in a transport's error text reaches the result and the store.
+test('[vector] an RPC error quoting its URL loses the key: why() and a failed call reason are redacted', async () => {
+  const KEY = 'k3yS3cr3t0123456789';
+  const err = new Error(`HTTP request failed.\n\nURL: https://base-mainnet.example.org/v2/${KEY}\nRequest body: {"method":"eth_call"}`);
+  const w = why(err);
+  assert.ok(!w.includes(KEY), w);
+  assert.ok(w.includes('https://base-mainnet.example.org/…'), 'the host stays for the diagnosis');
+  // Range: a key in the userinfo of a URL that crosses the 200-character cap. Cut first, the key would
+  // read as the host (`https://KEY` with no `@`) and survive the redaction: scrub, then cut.
+  const long = why(new Error(`${'x'.repeat(180)} https://${KEY}@node.example.org/v2`));
+  assert.ok(!long.toLowerCase().includes(KEY.slice(0, 6).toLowerCase()) && long.length <= 200, long);
+  assert.ok(!why(new Error(`${'x'.repeat(190)} wss://node.example.org/ws/${KEY}`)).includes(KEY.slice(0, 4)));
+  // The same message through callMany: the reason a token-text read stores.
+  const failing: ChainRpc = { request: async () => { throw err; } };
+  const [r] = await callMany(new Meter(), failing, [{ to: addr(1), data: '0x95d89b41' }], 900);
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && !r.reason.includes(KEY) && r.reason.startsWith('call failed: HTTP request failed.'), JSON.stringify(r));
 });
 
 // ---------------------------------------------------------------- scan.ts: walk
@@ -645,6 +677,40 @@ test('[vector] FileStore: an append after a torn last line keeps every op of tha
     await s.append(8453, b);
     assert.deepEqual(await s.load(8453), [...a, ...b]);
     assert.equal(materialize(await s.load(8453)).cursors.get(S.toLowerCase())!.logs, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Mutant: FileStore.append writes one op per line again (store.ts) -> a cut after the venue line keeps the
+// venue without its cursor: search finds it with no committed coverage.
+// Mutant: load drops a line that is not an array -> an operation object line is lost.
+// A crash can stop an append at any byte. Whatever the cut, the chunk is all or nothing.
+test('[fuzz] FileStore: a crash at any byte of an append leaves that chunk all or nothing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'onchain-scan-'));
+  try {
+    const s = new FileStore(dir);
+    const p = join(dir, '8453.jsonl');
+    const a: IndexOp[] = [venueOp(V1, 10), cursor(S, 0, 10)];
+    const b: IndexOp[] = [venueOp(addr(0xc1), 11, addr(0xd1), addr(0xb)), venueOp(addr(0xc2), 11), cursor(S, 0, 11)];
+    await s.append(8453, a);
+    const first = await readFile(p, 'utf8');
+    await s.append(8453, b);
+    const second = await readFile(p, 'utf8');
+    assert.ok(second.startsWith(first));
+    for (let k = first.length; k < second.length; k++) {
+      await writeFile(p, second.slice(0, k), 'utf8');
+      const ops = await s.load(8453);
+      assert.deepEqual(ops, k === second.length - 1 ? [...a, ...b] : a, `cut at byte ${k}`);
+      assert.equal(materialize(ops).byToken.has(addr(0xd1).toLowerCase()), k === second.length - 1, `cut at byte ${k}`);
+    }
+    // A committed chunk after the torn one is still read whole.
+    await writeFile(p, second.slice(0, second.length - 5), 'utf8');
+    await s.append(8453, b);
+    assert.deepEqual(await s.load(8453), [...a, ...b]);
+    // A line holding one operation object (the earlier layout) is still read.
+    await appendFile(p, JSON.stringify(cursor(S, 0, 12)) + '\n', 'utf8');
+    assert.deepEqual(await s.load(8453), [...a, ...b, cursor(S, 0, 12)]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

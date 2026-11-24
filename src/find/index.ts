@@ -348,7 +348,7 @@ async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId:
 
 const depthKey = (c: Candidate) => c.depth.upTo1pct?.usdOut ?? -1n;
 
-interface Proposed { address: Address; sources: SourceStatus['name'][]; proposedBy: string[]; agreement?: Candidate['agreement']; prefilterUsd?: bigint | null }
+interface Proposed { address: Address; sources: SourceStatus['name'][]; proposedBy: string[]; agreement?: Candidate['agreement']; prefilterUsd?: bigint | null; prefilterPartial?: boolean }
 
 const MODES = ['onchain', 'centralized', 'both'] as const;
 
@@ -373,7 +373,7 @@ export async function proposals(req: { query: string; chainId: number; fetch?: t
 
 /** The on-chain index brought up to date on `rpc`, searched, and its matches given the pre-filter
  *  measure in the index's block. A failed run is reported as the 'onchain' source, never thrown. */
-async function fromIndex(req: FindTokenRequest, chainId: number, query: string, reader: FindReader): Promise<{ status: SourceStatus; discovery: Discovery | null; matches: IndexMatch[]; measure: Map<string, bigint | null> }> {
+async function fromIndex(req: FindTokenRequest, chainId: number, query: string, reader: FindReader): Promise<{ status: SourceStatus; discovery: Discovery | null; matches: IndexMatch[]; measure: { usd: Map<string, bigint | null>; partial: Set<string> } }> {
   const store = req.store ?? defaultStore;
   const opts: IndexOptions = {
     chainId, rpc: req.rpc!, store, ...(req.hub !== undefined ? { hub: req.hub } : {}),
@@ -394,7 +394,7 @@ async function fromIndex(req: FindTokenRequest, chainId: number, query: string, 
     if (d.run?.errors.length) notes.push(`${d.run.errors.length} index errors (discovery.run.errors)`);
     return { status: { name: 'onchain', ok: true, ...(notes.length ? { note: notes.join('; ') } : {}) }, discovery: d, matches, measure };
   } catch (e) {
-    return { status: { name: 'onchain', ok: false, error: msg(e) }, discovery: null, matches: [], measure: new Map() };
+    return { status: { name: 'onchain', ok: false, error: msg(e) }, discovery: null, matches: [], measure: { usd: new Map(), partial: new Set() } };
   }
 }
 
@@ -435,7 +435,9 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
   for (const m of onchain?.matches ?? []) {
     add(m.token, 'onchain', null);
     for (const v of m.venues) add(m.token, 'onchain', `onchain:${getAddress(v.source)}`);
-    byAddr.get(lc(m.token))!.prefilterUsd = onchain!.measure.get(lc(m.token)) ?? null;
+    const e = byAddr.get(lc(m.token))!;
+    e.prefilterUsd = onchain!.measure.usd.get(lc(m.token)) ?? null;
+    if (onchain!.measure.partial.has(lc(m.token))) e.prefilterPartial = true;
   }
   for (const a of answers ?? []) for (const p of a.proposals) add(p.address, p.source, p.source);
   if (mode === 'both') for (const e of byAddr.values()) {
