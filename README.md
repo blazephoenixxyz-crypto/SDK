@@ -304,6 +304,72 @@ block; nothing here is an executed price.
   with that hash or throws `rpc_error`. Each `UsdLeg` carries the Quoter's `impactBps` and
   `route` (additive fields).
 
+## Find a token by name
+
+```ts
+import { findToken } from '@blazephoenix/sdk/find';
+
+const r = await findToken({ query: 'PEPE', chainId: 8453, rpc: 'https://your-node.example' });
+// r.candidates: address, rank, label ('most liquid' on the first only), proposedBy, hasCode,
+// symbol / name / decimals read on your RPC, lookalike, depth, liquidity (and xray, when asked)
+// r.mode: 'onchain' (the default); r.discovery: the index's block, coverage per source, complete
+// r.sources: [{ name: 'onchain', ok, error? }]; r.warnings; r.basis
+```
+
+Candidates for a name or ticker, found on chain and ranked by the depth your RPC measures. It
+never picks one: the result has no `selected` or `best` field, and the choice stays with you.
+
+- **Found on chain, by default.** The candidates come from an index of the venues that the
+  Hub's admitted factories created, built from their creation events on your RPC, and matched
+  against the symbols and names read there. No third party sees the query: `fetch` is never
+  called. Layer 1 covers every small source from block 0 and the recent 7-day window of the
+  large ones (more than 250,000 creation events); later calls only walk up.
+  `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
+  (in memory by default; `FileStore` keeps it on disk). A store holds one Hub's index per chain:
+  a run refuses a store with another Hub's cursor. One writer per directory and chain: runs in one
+  process wait for each other on any `FileStore` with the same `dir` string (compared as written,
+  trailing slashes removed: `./idx` and an absolute path to it are two locks), but two processes must not
+  update one directory at once. A custom `IndexStore` must make each `append`
+  call atomic (all its operations stored or none). `indexStatus` uses the default `smallMax`
+  unless you pass the one the index was built with. `r.discovery` says what was covered:
+  the block, each source's range and its count against the on-chain counter, and whether the
+  index is complete. When it is not, the first label reads "most liquid of those found"; not
+  found in the covered range is not "does not exist". An index that fails is listed in
+  `sources` with its error and gives no candidates; it never falls back to a third party.
+- **Trust point: your RPC. Found on chain is not endorsed.** Anyone can create a venue: a match
+  only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
+  venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
+  deepest are counted in the warnings and left out (`includeDust: true` lists them, still within
+  `maxCandidates`: if `omitted` is above 0, raise `maxCandidates` to see the rest). That
+  measure, `prefilterUsd`, is a lower bound: venues paired with other tokens, venues whose
+  balances do not sit at their address, and unread balances add nothing.
+  Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on
+  your RPC.
+- **Centralized search: opt-in only.** `sources: 'centralized'` asks the CoinGecko and
+  Dexscreener public search instead, without keys; `sources: 'both'` asks both and gives each
+  candidate an `agreement`. Those indexes then see the query and become a trust point: they
+  only propose, and can miss a token, list an impostor, or be down. A failed index is listed in
+  `sources` with its error, and the result does not pretend to be complete. `fetch` is
+  injectable.
+- **"Most liquid" is not "official".** The label on the first candidate says it has the deepest
+  measured depth; no list here is official. Impostors copy tickers: the warnings count how many
+  candidates read as the ticker, and `lookalike` flags hidden characters, mixed scripts,
+  letters from other scripts that look like ASCII, and compatibility forms.
+- **Depth.** `usdValue` at each order size (`sizes`, whole USD, default 10 to 1,000,000):
+  `upTo1pct` and `upTo5pct` are the largest sizes whose impact, against the smallest size and
+  rounded up, stays within 1% and 5%. The ladder makes this a lower bound: "sells up to N before
+  1% impact". Ranking uses `upTo1pct`.
+- **Liquidity is not depth.** `liquidity` is the token balances the venues on the measured route
+  hold, valued at the measured price (the candidate at its smallest measured size, the dollar
+  token at 1, WETH at the `usdValue` of one WETH). In concentrated venues (V3, V4) much of it can
+  sit outside the current price range: high liquidity with low depth is possible.
+- **NOT_MEASURED, never 0.** A Uniswap V4 venue keeps its balances in the shared PoolManager, not
+  at the venue, so its liquidity is `NOT_MEASURED` with that reason. So is any venue kind whose
+  balances are not known to sit at its address, and any token that is neither the candidate, the
+  dollar token nor WETH. No code at an address: `hasCode: false` and no depth is quoted.
+- **Liquidity is not safety.** It can be withdrawn at any time. Pass `xray: { transport }` to run
+  the X-Ray on each candidate with code (off by default).
+
 ## Errors
 
 Every failed node read inside a client method, `solvency()` and `watchFills`' `onError` included, is a

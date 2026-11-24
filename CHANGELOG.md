@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.8.0 — findToken (on-chain discovery)
+
+- `findToken({ query, chainId, rpc })` (`@blazephoenix/sdk/find`): candidates for a name or
+  ticker, found on chain by default (`sources: "onchain"`): an index of the venues the Hub's
+  admitted factories created, built from their creation events on your own RPC and matched
+  against the symbols and names read there, so no third party sees the query. Layer 1 covers
+  every small source from block 0 and the recent 7-day window of the large ones (more than
+  250,000 creation events); `index: "full"` takes them down to block 0. `mode` and `discovery`
+  (block, coverage per source against its on-chain counter, `complete`) say what was searched;
+  an incomplete index labels the first candidate "most liquid of those found", and not found
+  in the covered range is not "does not exist". A failed index is listed in `sources` with its
+  error and never falls back to a third party. Found on chain is not endorsed: anyone can
+  create a venue.
+- The centralized search (CoinGecko and Dexscreener public search) is opt-in only:
+  `sources: "centralized"`, or `"both"` with each candidate's `agreement`. Those indexes then see
+  the query and are the trust point; a failed index is listed in `sources` with its error.
+- Every candidate is read on your RPC: code, symbol, name, decimals, depth at 1% and 5% impact
+  over a ladder of USD sizes (a lower bound), and the balances of the venues on the measured
+  route. On-chain matches are first ranked by what their venues hold in the bridge tokens in the
+  index's block; those under 0.1% of the deepest are counted and left out (`includeDust: true`
+  lists them). Ranked by measured depth; the first is labelled "most liquid", never "official",
+  and nothing is selected.
+- `updateIndex`, `buildIndex`, `searchIndex`, `indexStatus`, `MemoryStore` and `FileStore` run the
+  index on its own; `proposals` is the centralized search alone. A source's `large` flag in
+  `discovery.coverage`, and `layer2.pending`, use the `smallMax` the run scanned with, not the
+  default; `indexStatus({ smallMax })` takes it too, and without it uses the default (the store
+  does not record the run's `smallMax`). A store holds one Hub's index per chain: `updateIndex`
+  and `buildIndex` refuse a store that holds another Hub's cursor (they throw; index that Hub in
+  another store). A custom `IndexStore` must make each `append` call atomic.
+- `discovery.complete` is true only when everything was measured: a token whose `symbol()` and
+  `name()` reads failed at the transport counts as `unread` (read again next run), not as failed,
+  and a kind-1 factory (Slipstream has a counter, Uniswap V3 none) is complete without a counter
+  only where the factory answered that it has none (a revert or no data), never after a failed read.
+- `prefilterUsd` is a lower bound of what a token's venues hold in the bridge tokens, not its
+  liquidity: venues paired with other tokens, venues whose balances do not sit at their address,
+  and unread balances add nothing.
+- Liquidity of Uniswap V4 venues, and of venue kinds whose balances do not sit at their address,
+  is `NOT_MEASURED` with its reason, never 0. Fixed warnings: "most liquid" is not "official",
+  impostors copy tickers, liquidity is not safety.
+- Every depth size, and the WETH price that values a WETH-paired venue, is read in the block of
+  the price probe (`FindReader.usdValue` takes its `blockHash`); a lost block stops the ladder
+  with its reason. A probe that quotes 0 at one whole token is retried at 10^3 to 10^12 whole
+  tokens. The ticker count is `NOT_MEASURED` when no symbol was read, never 0. An index that
+  stalls its response body fails by name after the same 10 s timeout.
+- `lookalike`, `skeleton`, `visibleText`, `tokenText`: Unicode checks for ticker impostors
+  (hidden characters, mixed scripts, Cyrillic, Greek and Armenian letters that look like ASCII,
+  compatibility forms).
+- Optional X-Ray per candidate (`xray: { transport }`), off by default.
+
 ## 1.7.0 — quoted USD prices, on one chain and across chains
 
 Some of these functions are already prepared for the V2 DEX and the V4 staking engine;
