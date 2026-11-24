@@ -8,10 +8,13 @@
 // Fresh MemoryStore per test, explicit hub, no network. Each test names the mutant that turns it red.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { decodeFunctionData, getAddress, parseAbi, type Address, type Hex } from 'viem';
 import { buildIndex, indexStatus, searchIndex, updateIndex, type Discovery, type IndexOptions } from '../../src/find/onchain/index.js';
 import { HUB_KIND } from '../../src/find/onchain/scan.js';
-import { materialize, MemoryStore, type CursorOp, type IndexOp, type IndexStore } from '../../src/find/onchain/store.js';
+import { FileStore, materialize, MemoryStore, type CursorOp, type IndexOp, type IndexStore } from '../../src/find/onchain/store.js';
 import { MULTICALL3 } from '../../src/find/onchain/symbols.js';
 import { addr, FakeChain, factoryLog, v2Log, v3Log, word, type FakeChainOptions, type FakeLog } from './fake-rpc.js';
 
@@ -156,7 +159,7 @@ test('[range] a cursor shorter than the rollback depth with an unconfirmed tip b
   const d = await up(c, store, { maxRequests: 4 });
   assert.equal(d.run?.stopped, 'requests');
   const ops = await store.load(CHAIN);
-  assert.deepEqual(ops.slice(1), [{ o: 'd', source: HUB, after: 836 }, { o: 'c', source: HUB, kind: HUB_KIND, from: 901, to: 900, hash: c.hashOf(900), large: false }]);
+  assert.deepEqual(ops.slice(1), [{ o: 'd', source: HUB, after: 836 }, { o: 'c', source: HUB, kind: HUB_KIND, from: 901, to: 900, hash: c.hashOf(900), large: false }, { o: 't', after: 836 }]);
   assert.equal(c.count('eth_getBlockByNumber'), 2);
   const full = await up(c, store);
   assert.equal(full.complete, true);
@@ -497,7 +500,7 @@ test('[vector] a store that holds another Hub\'s index is refused, not mixed; th
 
 // Mutant: index.ts `return k !== ZERO && (!x || transportFailed(x));` -> `return k !== ZERO && !x;` -> the token whose reads
 // failed at the transport stays FAILED for ever and its symbol is never found.
-// Mutant: symbols.ts transportFailed `x.status === 'FAILED' && ...includes(CALL_FAILED)` -> `x.status === 'FAILED'` -> the
+// Mutant: symbols.ts transportFailed `!!x.reason?.includes(CALL_FAILED)` -> `x.status === 'FAILED'` -> the
 // reverting token is read again on every run (one more eth_call).
 // Mutant: index.ts discovery `if (!x || transportFailed(x)) unread++;` -> `if (!x) unread++;` -> tk(1)'s unmeasured text
 // counts as failed (symbolFailed 2, unread 0) and the first run reports complete: true.
@@ -590,6 +593,28 @@ test('[vector] a finalized block below the stored tip: every cursor is cut to th
   assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(7))).length, 1);
 });
 
+// Mutant: index.ts `!st.factories.has(lc(k.source)) &&` -> `false &&` -> F5, registered at block 930, keeps its venue at
+// block 100 searchable at asOfBlock 900, outside the Hub's registry there.
+// Mutant: index.ts unlisted `[{ o: 'd', source: k.source, after: -1 }, cursorOp(` -> `[cursorOp(` -> the venue stays.
+test('[vector] a finalized block below a factory\'s registration: its venues made before it go with it, and come back with it', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 100), factoryLog(HUB, F5, 0, 930), v2Log(F5, tk(7), tk(8), pair(3), 100)];
+  const c = chain({ logs, finalized: 960, factoryCount: 3, counters: { [F2]: 1, [F5]: 1 } });
+  const store = new MemoryStore();
+  const d1 = await up(c, store);
+  assert.deepEqual([cov(d1, F5)?.logs, d1.complete, (await searchIndex({ chainId: CHAIN, store }, tk(7))).length], [1, true, 1]);
+  c.finalized = 900;
+  c.o.factoryCount = 2;
+  const d2 = await up(c, store);
+  assert.deepEqual([d2.asOfBlock, cov(d2, F5), cov(d2, F2)?.logs, d2.complete], [900, undefined, 1, true]);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, tk(7)), []);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(1))).length, 1);
+  c.finalized = 960;
+  c.o.factoryCount = 3;
+  const d3 = await up(c, store);
+  assert.deepEqual([cov(d3, F5)?.logs, d3.complete], [1, true]);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(7)))[0]?.venues[0]?.block, 100);
+});
+
 // Mutant: index.ts discovery `const sameRun = !!t && !!r && t.target === r.target && lc(t.hash) === lc(r.hash);` ->
 // `const sameRun = !!t;` -> a run stopped before its RunOp reports target 950 with asOfBlock 900.
 test('[unit] the reported target is the stored snapshot\'s: a run stopped before its Hub reads reports asOfBlock and target of the same block', async () => {
@@ -656,4 +681,97 @@ test('[vector] a kind-1 (Slipstream) factory whose counter read failed at the tr
   // No Multicall3: no counter was read, so a kind-1 factory is not complete.
   const noMc = await up(chain({ logs, counters: { [F2]: 1 }, noMulticall: true }), new MemoryStore());
   assert.deepEqual([cov(noMc, F3)?.counter, cov(noMc, F3)?.complete, noMc.complete], [null, false, false]);
+});
+
+// Mutant: index.ts `if (textsAfter !== Infinity) fix.push({ o: 't', after: textsAfter });` -> removed -> tk(3) keeps the
+// text read at block 900 on the discarded branch ('OLD3') and is never read again.
+// Mutant: index.ts `after: textsAfter` -> `after: -1` -> tk(1), read at block 800 below the rollback, is read again.
+// Mutant: store.ts materialize `t.readAtBlock > op.after` -> `t.readAtBlock >= 0` -> the same.
+test('[vector] reorg under the tip: token text read in the rolled-back range is read again, text read below it is kept', async () => {
+  const keep = [v2Log(F2, tk(1), tk(2), pair(1), 700), v2Log(F2, tk(3), tk(4), pair(2), 870)];
+  const c = chain({ logs: keep, finalized: 800, counters: { [F2]: 1 }, tokens: { [tk(1)]: { symbol: { string: 'ONE' } }, [tk(3)]: { symbol: { string: 'OLD3' } } } });
+  const store = new MemoryStore();
+  await up(c, store);
+  c.finalized = 900;
+  c.o.counters = { [F2]: 2 };
+  assert.equal((await up(c, store)).complete, true);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, 'old3'))[0]?.readAtBlock, 900);
+  // Blocks from 850 get new hashes; the venue at 870 is on both branches, its token's text is not.
+  c.reorg(850, 'b', [keep[1]]);
+  c.o.tokens = { [tk(1)]: { symbol: { string: 'ONE' } }, [tk(3)]: { symbol: { string: 'NEW3' } } };
+  c.finalized = 950;
+  c.head = 1050;
+  const d = await up(c, store);
+  assert.equal(d.complete, true);
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, 'old3'), []);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, 'new3')).map((m) => [lc(m.token), m.readAtBlock]), [[lc(tk(3)), 950]]);
+  assert.equal((await searchIndex({ chainId: CHAIN, store }, 'one'))[0]?.readAtBlock, 800);
+});
+
+// Mutant: index.ts `const now = c.logsRead ? (await getBlock(c.m, c.rpc, t.target))?.hash ?? null : t.hash;` -> `const now = t.hash;`
+// -> the venue read on branch b stays under branch a's hash: the next run's tip check passes and keeps it searchable.
+// Mutant: index.ts walk down `{ c.logsRead = true; return getLogs(` -> `{ return getLogs(` -> a first run (walks down only) is not checked.
+test('[vector] the target\'s hash moves while the logs are read: the tips lose their hash and the next run scans the range again', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 300)];
+  const c = chain({ logs, counters: { [F2]: 1 } });
+  const store = new MemoryStore();
+  const ghost = v2Log(F2, tk(5), tk(6), pair(9), 890);
+  let flipped = false;
+  // The node answers the scan from branch b (block 880 up, with one more venue), then goes back to branch a.
+  const rpc = via(c, (method) => { if (method === 'eth_getLogs' && !flipped) { flipped = true; c.reorg(880, 'b', [ghost]); } });
+  const d1 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.match(d1.run!.errors.join('\n'), /block 900: hash .* after the scan/);
+  const k1 = await lastCursors(store);
+  for (const s of [HUB, F2, F3]) assert.deepEqual([k1.get(lc(s))?.to, k1.get(lc(s))?.hash], [900, null], s);
+  c.reorg(880, 'a', []);
+  const d2 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual(await searchIndex({ chainId: CHAIN, store }, tk(5)), []);
+  assert.deepEqual([d2.run?.errors, cov(d2, F2)?.logs, d2.complete], [[], 1, true]);
+});
+
+// Mutant: index.ts lockKey `if (!(store instanceof FileStore)) return store;` -> `return store;` -> both runs load the empty
+// file before either appends: both Hubs' cursors are stored and every later run on that directory is refused.
+test('[vector] two FileStore instances on one directory and chain serialize: the second Hub is refused, not mixed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'onchain-lock-'));
+  try {
+    const HUB_A = addr(0xabcd), HUB_B = addr(0xbcde);
+    const a = new FakeChain({ head: 1000, finalized: 900, hub: HUB_A, factoryCount: 1, counters: { [F2]: 1 }, logs: [factoryLog(HUB_A, F2, 0, 5), v2Log(F2, tk(1), tk(2), pair(1), 300)] });
+    const b = new FakeChain({ head: 1000, finalized: 900, hub: HUB_B, factoryCount: 1, logs: [factoryLog(HUB_B, F4, 1, 5)] });
+    const r = await Promise.allSettled([
+      updateIndex({ chainId: CHAIN, rpc: a, store: new FileStore(dir), hub: HUB_A }),
+      updateIndex({ chainId: CHAIN, rpc: b, store: new FileStore(`${dir}/`), hub: HUB_B }),
+    ]);
+    assert.deepEqual(r.map((x) => x.status), ['fulfilled', 'rejected']);
+    assert.match(String((r[1] as PromiseRejectedResult).reason), /holds the index of Hub/);
+    const hubs = new Set((await new FileStore(dir).load(CHAIN)).filter((x) => x.o === 'c' && x.kind === HUB_KIND).map((x) => lc((x as CursorOp).source)));
+    assert.deepEqual([...hubs], [lc(HUB_A)]);
+    assert.equal((await updateIndex({ chainId: CHAIN, rpc: a, store: new FileStore(dir), hub: HUB_A })).complete, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Mutant: symbols.ts textOf `|| cut(sym) || cut(nam)` -> `` -> a token with one field read and the other lost to the
+// transport is READ with no reason: counted as measured and never read again.
+// Mutant: symbols.ts transportFailed `!!x.reason?.includes(CALL_FAILED)` -> `x.status === 'FAILED' && !!x.reason?.includes(CALL_FAILED)` -> the same.
+test('[vector] a token with one of symbol() and name() lost to the transport stays unread, keeps the other, and is read again', async () => {
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), 300)];
+  const c = chain({ logs, counters: { [F2]: 1 }, tokens: { [tk(1)]: { symbol: { string: 'GOOD' }, name: { string: 'Good Name' } }, [tk(2)]: { symbol: { string: 'TWO' }, name: { string: 'Second' } } } });
+  const store = new MemoryStore();
+  const [t1, t2] = [tk(1), tk(2)].map((t) => lc(t).slice(2));
+  let down = true;
+  // tk(1)'s name() and tk(2)'s symbol() fail at the transport; their other field answers.
+  const rpc = via(c, (method, params) => {
+    const p = JSON.stringify(params).toLowerCase();
+    if (down && method === 'eth_call' && ((p.includes(t1) && p.includes('06fdde03')) || (p.includes(t2) && p.includes('95d89b41')))) throw new Error('503 upstream');
+  });
+  const d1 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual([d1.tokens, d1.complete], [{ known: 2, symbolRead: 0, symbolFailed: 0, unread: 2 }, false]);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, 'good')).map((m) => [m.status, m.symbol, m.name]), [['READ', 'GOOD', null]]);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, 'second')).map((m) => [m.status, m.symbol, m.name]), [['READ', null, 'Second']]);
+  down = false;
+  const d2 = await updateIndex({ chainId: CHAIN, rpc, store, hub: HUB });
+  assert.deepEqual([d2.tokens, d2.complete], [{ known: 2, symbolRead: 2, symbolFailed: 0, unread: 0 }, true]);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, 'goodname')).map((m) => [m.symbol, m.name]), [['GOOD', 'Good Name']]);
+  assert.deepEqual((await searchIndex({ chainId: CHAIN, store }, 'two')).map((m) => [m.symbol, m.name]), [['TWO', 'Second']]);
 });

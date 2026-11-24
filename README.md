@@ -326,7 +326,9 @@ never picks one: the result has no `selected` or `best` field, and the choice st
   large ones (more than 250,000 creation events); later calls only walk up.
   `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
   (in memory by default; `FileStore` keeps it on disk). A store holds one Hub's index per chain:
-  a run refuses a store with another Hub's cursor. A custom `IndexStore` must make each `append`
+  a run refuses a store with another Hub's cursor. One writer per directory and chain: runs in one
+  process wait for each other on any `FileStore` with the same `dir`, but two processes must not
+  update one directory at once. A custom `IndexStore` must make each `append`
   call atomic (all its operations stored or none). `indexStatus` uses the default `smallMax`
   unless you pass the one the index was built with. `r.discovery` says what was covered:
   the block, each source's range and its count against the on-chain counter, and whether the
@@ -336,7 +338,8 @@ never picks one: the result has no `selected` or `best` field, and the choice st
 - **Trust point: your RPC. Found on chain is not endorsed.** Anyone can create a venue: a match
   only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
   venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
-  deepest are counted in the warnings and left out (`includeDust: true` lists them). That
+  deepest are counted in the warnings and left out (`includeDust: true` lists them, still within
+  `maxCandidates`: if `omitted` is above 0, raise `maxCandidates` to see the rest). That
   measure, `prefilterUsd`, is a lower bound: venues paired with other tokens, venues whose
   balances do not sit at their address, and unread balances add nothing.
   Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on

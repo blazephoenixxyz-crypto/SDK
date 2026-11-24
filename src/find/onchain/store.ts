@@ -26,6 +26,8 @@ export interface TokenOp {
 }
 /** Drop what a source found above block `after` (a reorg or an untrusted tip). */
 export interface DropOp { o: 'd'; source: Address; after: number }
+/** Drop every token text read above block `after` (a reorg): read again by the next text pass. */
+export interface TextDropOp { o: 't'; after: number }
 /** What the Hub and the target block said on the last update. */
 export interface RunOp {
   o: 'r';
@@ -42,7 +44,7 @@ export interface RunOp {
 }
 /** A Hub `Factory_` log: a factory admitted (or refreshed in place) with its kind; the last one wins. */
 export interface FactoryOp { o: 'f'; source: Address; factory: Address; kind: number; mode: number; block: number; logIndex: number }
-export type IndexOp = CursorOp | VenueOp | MalformedOp | TokenOp | DropOp | RunOp | FactoryOp;
+export type IndexOp = CursorOp | VenueOp | MalformedOp | TokenOp | DropOp | TextDropOp | RunOp | FactoryOp;
 
 /** One index per (store, chain), of one Hub: a run refuses a store that holds another Hub's index.
  *  `append` must be atomic per call: the ops of one call are all stored or none (a cursor is appended
@@ -68,7 +70,9 @@ export const defaultStore: IndexStore = new MemoryStore();
 
 /** Node only: `<dir>/<chainId>.jsonl`, one append per line (a JSON array of its operations; a line
  *  holding one operation object is read too). node:fs is imported on first use, so a browser bundle
- *  never needs it. A torn last line (a crash mid-write) is ignored on load: its chunk is all or nothing. */
+ *  never needs it. A torn last line (a crash mid-write) is ignored on load: its chunk is all or nothing.
+ *  One writer per directory and chain: runs in one process wait for each other whichever FileStore
+ *  instance (with the same `dir` string) they use; two processes on one directory are not serialized. */
 export class FileStore implements IndexStore {
   constructor(readonly dir: string) {}
   private path(chainId: number) { return `${this.dir.replace(/\/+$/, '')}/${chainId}.jsonl`; }
@@ -149,6 +153,7 @@ export function materialize(ops: readonly IndexOp[]): IndexState {
         for (const [k, f] of factoryLogs) if (lc(f.source) === s && f.block > op.after) factoryLogs.delete(k);
         break;
       }
+      case 't': for (const [k, t] of tokens) if (t.readAtBlock > op.after) tokens.delete(k); break;
       case 'r': run = op; break;
     }
   }

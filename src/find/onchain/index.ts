@@ -9,7 +9,7 @@ import { skeleton } from '../../text.js';
 import { COUNTER_REQUIRED, COUNTERS, CREATION_EVENTS, HUB_CALLS } from './kinds.js';
 import { chainRpc, getBlock, Meter, MeterStop, resolveTarget, toHex, why, type ChainRpc, type StopReason, type Target } from './rpc.js';
 import { getLogs, HUB_KIND, cursorOp, opsOf, walk, type Source, type WalkResult } from './scan.js';
-import { defaultStore, materialize, type Cursor, type IndexOp, type IndexState, type IndexStore, type RunOp } from './store.js';
+import { defaultStore, FileStore, materialize, type Cursor, type IndexOp, type IndexState, type IndexStore, type RunOp } from './store.js';
 import { callMany, MULTICALL3, readTexts, transportFailed, wordAddress, wordNumber, type Call } from './symbols.js';
 
 /** A source with more creation events than this is large: layer 1 covers only its recent window. */
@@ -92,11 +92,20 @@ export function liveHub(chainId: number): Address | null {
   return null;
 }
 
-// One run at a time per (store, chain): two runs appending to one log would interleave cursors.
-const locks = new WeakMap<IndexStore, Map<number, Promise<unknown>>>();
+// One run at a time per (store, chain): two runs appending to one log would interleave cursors. Every
+// FileStore on one directory is one store: they write the same file.
+const locks = new WeakMap<object, Map<number, Promise<unknown>>>();
+const dirs = new Map<string, object>();
+const lockKey = (store: IndexStore): object => {
+  if (!(store instanceof FileStore)) return store;
+  const d = store.dir.replace(/\/+$/, '');
+  if (!dirs.has(d)) dirs.set(d, {});
+  return dirs.get(d)!;
+};
 function exclusive<T>(store: IndexStore, chainId: number, f: () => Promise<T>): Promise<T> {
-  const m = locks.get(store) ?? new Map<number, Promise<unknown>>();
-  locks.set(store, m);
+  const key = lockKey(store);
+  const m = locks.get(key) ?? new Map<number, Promise<unknown>>();
+  locks.set(key, m);
   const p = (m.get(chainId) ?? Promise.resolve()).then(f, f);
   m.set(chainId, p.catch(() => undefined));
   return p;
@@ -144,6 +153,8 @@ interface Ctx {
   store: IndexStore;
   errors: string[];
   stopped: StopReason | null;
+  /** This run asked eth_getLogs: its logs are anchored by number, checked against the target's hash. */
+  logsRead?: boolean;
 }
 
 function append(c: Ctx, ops: IndexOp[]): Promise<void> {
@@ -201,15 +212,19 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
   // time (without it, a run stopped right after a rollback would roll back again on every retry).
   const fix: IndexOp[] = [];
   const kept = new Map<number, Hex | null>();
+  let textsAfter = Infinity;
   for (const cur of st0.cursors.values()) {
     if (cur.from > cur.to) continue;
     if (cur.hash !== null && tips.get(cur.to) === lc(cur.hash)) continue;
     const keep = cur.to - REORG_DEPTH;
+    textsAfter = Math.min(textsAfter, keep);
     fix.push({ o: 'd', source: cur.source, after: keep });
     if (keep < cur.from) { fix.push(cursorOp({ address: cur.source, kind: cur.kind }, t.target + 1, t.target, t.hash, cur.large)); continue; }
     if (!kept.has(keep)) kept.set(keep, (await getBlock(c.m, c.rpc, keep))?.hash ?? null);
     fix.push(cursorOp({ address: cur.source, kind: cur.kind }, cur.from, keep, kept.get(keep)!, cur.large));
   }
+  // Token text read in the rolled-back range may come from the discarded branch: read again.
+  if (textsAfter !== Infinity) fix.push({ o: 't', after: textsAfter });
   await append(c, fix);
 
   // 2. Multicall3 must be there: without it no counter and no symbol can be read.
@@ -262,6 +277,11 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
   // A source re-listed under another kind: what the old kind's filter found goes, and it is scanned anew from the target.
   const relisted = sources.filter((s) => { const k = st.cursors.get(lc(s.address)); return !!k && k.kind !== s.kind; });
   await append(c, relisted.flatMap((s): IndexOp[] => [{ o: 'd', source: s.address, after: -1 }, cursorOp(s, t.target + 1, t.target, t.hash, false)]));
+  // A source the Hub no longer lists at the target (its Factory_ log went with a cut or a rollback): its
+  // venues go, and it is scanned anew if listed again. A V4 PoolManager is the Hub's read, not a Factory_ log.
+  const v4 = runOp.v4PoolManager;
+  const unlisted = [...st.cursors.values()].filter((k) => k.from <= k.to && k.kind !== HUB_KIND && !st.factories.has(lc(k.source)) && !(k.kind === 4 && (v4 === null || lc(k.source) === lc(v4))));
+  await append(c, unlisted.flatMap((k): IndexOp[] => [{ o: 'd', source: k.source, after: -1 }, cursorOp({ address: k.source, kind: k.kind }, t.target + 1, t.target, t.hash, false)]));
 
   // 6. Large or small: the counter decides; without one, the logs seen so far (and found during the walk).
   st = materialize(c.all);
@@ -289,6 +309,14 @@ async function body(c: Ctx, hub: Address, t: Target, layer2: boolean) {
   const ordered = layer2 ? [...sources].sort((a, b) => remaining(a) - remaining(b)) : sources;
   await scanSources(c, t, ordered, floorOf, smallMax, span, o.concurrency ?? CONCURRENCY, large, layer2 ? null : recentFloor);
   if (c.stopped) return;
+  // getLogs asks by number: if the target's hash moved during the scan, the logs may come from another
+  // branch. The tips anchored to it lose their hash, so the next run rolls them back and scans again.
+  const now = c.logsRead ? (await getBlock(c.m, c.rpc, t.target))?.hash ?? null : t.hash;
+  if (now === null || lc(now) !== lc(t.hash)) {
+    c.errors.push(`block ${t.target}: hash ${now ?? 'not answered'} after the scan, ${t.hash} before: rescanned from block ${t.target - REORG_DEPTH} next run`);
+    await append(c, [...materialize(c.all).cursors.values()].filter((k) => k.from <= k.to && k.to === t.target && k.hash !== null && lc(k.hash) === lc(t.hash)).map((k) => cursorOp({ address: k.source, kind: k.kind }, k.from, k.to, null, k.large)));
+    return;
+  }
 
   // 7. symbol() and name() of every token with no reading yet, in lots stored one by one.
   if (!multicall) return;
@@ -325,7 +353,7 @@ async function scanSources(
     const from = new Map(group.map((s) => [lc(s.address), cur(s)!.from]));
     const r = await walk({
       dir: 'up', from: to + 1, to: t.target, span, meter: c.m,
-      fetch: (lo, hi) => getLogs(c.m, c.rpc, group, lo, hi),
+      fetch: (lo, hi) => { c.logsRead = true; return getLogs(c.m, c.rpc, group, lo, hi); },
       commit: async (_lo, hi, logs) => {
         await append(c, [...opsOf(group, logs), ...group.map((s) => cursorOp(s, from.get(lc(s.address))!, hi, hi === t.target ? t.hash : null, large.has(lc(s.address)) || !!cur(s)?.large))]);
         return true;
@@ -350,7 +378,7 @@ async function scanSources(
       let grew = false;
       const r = await walk({
         dir: 'down', from: floor, to: top, span, meter: c.m,
-        fetch: (lo, hi) => getLogs(c.m, c.rpc, [s], lo, hi),
+        fetch: (lo, hi) => { c.logsRead = true; return getLogs(c.m, c.rpc, [s], lo, hi); },
         commit: async (lo, hi, raw) => {
           const ops = opsOf([s], raw);
           logs += ops.length;

@@ -86,7 +86,9 @@ export interface TokenText {
 export function textOf(token: Address, sym: CallResult, nam: CallResult, block: number): TokenText {
   const s = decodeText(sym), n = decodeText(nam);
   const failed = !sym.ok && !nam.ok && sym.reason !== 'reverted' ? sym.reason : null;
-  const reason = failed ?? (s === null && n === null ? `symbol: ${sym.ok ? 'not a string' : sym.reason}; name: ${nam.ok ? 'not a string' : nam.reason}` : undefined);
+  // A field the transport failed was not measured: the reason says so even when the other one was read.
+  const cut = (r: CallResult) => !r.ok && r.reason.startsWith(CALL_FAILED);
+  const reason = failed ?? (s === null && n === null || cut(sym) || cut(nam) ? `symbol: ${sym.ok ? (s === null ? 'not a string' : 'read') : sym.reason}; name: ${nam.ok ? (n === null ? 'not a string' : 'read') : nam.reason}` : undefined);
   return {
     token, status: s === null && n === null ? 'FAILED' : 'READ', ...(reason ? { reason } : {}),
     symbol: s === null ? null : tokenText(s), name: n === null ? null : tokenText(n),
@@ -94,8 +96,9 @@ export function textOf(token: Address, sym: CallResult, nam: CallResult, block: 
   };
 }
 
-/** A FAILED reading where symbol() or name() never answered (the transport failed): nothing was measured. */
-export const transportFailed = (x: { status: string; reason?: string }): boolean => x.status === 'FAILED' && !!x.reason?.includes(CALL_FAILED);
+/** A reading where symbol() or name() never answered (the transport failed): not measured, read again
+ *  until both are (a READ one keeps the other field's text meanwhile). */
+export const transportFailed = (x: { status: string; reason?: string }): boolean => !!x.reason?.includes(CALL_FAILED);
 
 /** symbol() and name() of each token at `block`, two subcalls per token. */
 export async function readTexts(m: Meter, rpc: ChainRpc, tokens: readonly Address[], block: number, maxPerLot = MAX_SUBCALLS): Promise<TokenText[]> {
