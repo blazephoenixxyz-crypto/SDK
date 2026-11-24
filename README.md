@@ -310,19 +310,38 @@ block; nothing here is an executed price.
 import { findToken } from '@blazephoenix/sdk/find';
 
 const r = await findToken({ query: 'PEPE', chainId: 8453, rpc: 'https://your-node.example' });
-// r.candidates: address, rank, label ('most liquid' on the first only), sources, hasCode,
+// r.candidates: address, rank, label ('most liquid' on the first only), proposedBy, hasCode,
 // symbol / name / decimals read on your RPC, lookalike, depth, liquidity (and xray, when asked)
-// r.sources: [{ name: 'coingecko', ok }, { name: 'dexscreener', ok, error? }]; r.warnings; r.basis
+// r.mode: 'onchain' (the default); r.discovery: the index's block, coverage per source, complete
+// r.sources: [{ name: 'onchain', ok, error? }]; r.warnings; r.basis
 ```
 
-Candidates for a name or ticker, ranked by the depth your RPC measures. It never picks one: the
-result has no `selected` or `best` field, and the choice stays with you.
+Candidates for a name or ticker, found on chain and ranked by the depth your RPC measures. It
+never picks one: the result has no `selected` or `best` field, and the choice stays with you.
 
-- **Trust point: third-party indexes.** The addresses come from the CoinGecko and Dexscreener
-  public search, without keys. They only propose: an index can miss a token, list an impostor,
-  or be down. A failed index is listed in `sources` with its error, and the result does not
-  pretend to be complete. Everything shown about a candidate (code, symbol, name, decimals,
-  depth, balances) is read on your RPC. `fetch` is injectable.
+- **Found on chain, by default.** The candidates come from an index of the venues that the
+  Hub's admitted factories created, built from their creation events on your RPC, and matched
+  against the symbols and names read there. No third party sees the query: `fetch` is never
+  called. Layer 1 covers every small source from block 0 and the recent 7-day window of the
+  large ones (more than 250,000 creation events); later calls only walk up.
+  `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
+  (in memory by default; `FileStore` keeps it on disk). `r.discovery` says what was covered:
+  the block, each source's range and its count against the on-chain counter, and whether the
+  index is complete. When it is not, the first label reads "most liquid of those found"; not
+  found in the covered range is not "does not exist". An index that fails is listed in
+  `sources` with its error and gives no candidates; it never falls back to a third party.
+- **Trust point: your RPC. Found on chain is not endorsed.** Anyone can create a venue: a match
+  only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
+  venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
+  deepest are counted in the warnings and left out (`includeDust: true` lists them).
+  Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on
+  your RPC.
+- **Centralized search: opt-in only.** `sources: 'centralized'` asks the CoinGecko and
+  Dexscreener public search instead, without keys; `sources: 'both'` asks both and gives each
+  candidate an `agreement`. Those indexes then see the query and become a trust point: they
+  only propose, and can miss a token, list an impostor, or be down. A failed index is listed in
+  `sources` with its error, and the result does not pretend to be complete. `fetch` is
+  injectable.
 - **"Most liquid" is not "official".** The label on the first candidate says it has the deepest
   measured depth; no list here is official. Impostors copy tickers: the warnings count how many
   candidates read as the ticker, and `lookalike` flags hidden characters, mixed scripts,

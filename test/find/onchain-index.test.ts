@@ -292,6 +292,34 @@ test('[range] the counter decides: 250000 is small (from block 0), 250001 is lar
   assert.equal((await searchIndex({ chainId: CHAIN, store }, tk(3))).length, 1);
 });
 
+// Mutant: index.ts discovery `counter > smallMax` -> `counter > SMALL_SOURCE_MAX` -> a source the run scanned from block 0
+// as small (counter under the caller's smallMax, above the default) is reported large and pending in layer 2.
+// Mutant: index.ts indexStatus `discovery(st, null, null, o.smallMax ?? SMALL_SOURCE_MAX)` -> `discovery(st, null, null, SMALL_SOURCE_MAX)`
+// -> indexStatus with the run's smallMax disagrees with the run.
+// Mutant: index.ts run `errors: c.errors }, o.smallMax ?? SMALL_SOURCE_MAX)` -> `errors: c.errors }, SMALL_SOURCE_MAX)` -> the run
+// reports with the default, not the smallMax it scanned with.
+test('[unit] the reported large flag uses the caller\'s smallMax: a counter above the default but under smallMax is small', async () => {
+  const target = 999_000, floor = floorFor(target, 2);
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), floor - 1), v2Log(F2, tk(3), tk(4), pair(2), floor)];
+  const store = new MemoryStore();
+  const d = await up(chain({ head: 1_000_000, finalized: target, counters: { [F2]: 300_000 }, logs }), store, { smallMax: 1_000_000 });
+  assert.deepEqual([cov(d, F2)?.fromBlock, cov(d, F2)?.large, cov(d, F2)?.logs, cov(d, F2)?.counter], [0, false, 2, 300_000]);
+  assert.deepEqual(d.layer2, { pending: 0, done: 0 });
+  const s = await indexStatus({ chainId: CHAIN, store, smallMax: 1_000_000 });
+  assert.deepEqual([cov(s, F2)?.large, s.layer2], [false, { pending: 0, done: 0 }]);
+});
+
+// Mutant: index.ts discovery `counter > smallMax` -> `counter >= smallMax` -> a counter exactly at smallMax is reported large.
+test('[range] the reported large flag at a caller\'s smallMax: a counter equal to it is small, one more is large', async () => {
+  const target = 999_000, floor = floorFor(target, 2);
+  const logs = [v2Log(F2, tk(1), tk(2), pair(1), floor - 1), v2Log(F2, tk(3), tk(4), pair(2), floor)];
+  const run = (n: number) => up(chain({ head: 1_000_000, finalized: target, counters: { [F2]: n }, logs }), new MemoryStore(), { smallMax: 1_000_000 });
+  const at = await run(1_000_000);
+  assert.deepEqual([cov(at, F2)?.fromBlock, cov(at, F2)?.large, at.layer2], [0, false, { pending: 0, done: 0 }]);
+  const over = await run(1_000_001);
+  assert.deepEqual([cov(over, F2)?.fromBlock, cov(over, F2)?.large, over.layer2], [floor, true, { pending: 1, done: 0 }]);
+});
+
 // Mutant: index.ts `const large = new Set(sources.filter(isLarge).map((s) => lc(s.address)));` -> `new Set<string>();`
 // -> the large source is scanned to block 0 by updateIndex.
 // Mutant: index.ts `const floorOf = (s: Source) => (layer2 ||` -> `(false ||` -> buildIndex stops at the recent floor too.

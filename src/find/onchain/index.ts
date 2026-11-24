@@ -77,7 +77,7 @@ export interface IndexMatch {
   name: string | null;
   status: 'READ' | 'FAILED' | 'UNREAD';
   readAtBlock: number | null;
-  venues: { source: Address; kind: number; venue: Hex; block: number }[];
+  venues: { source: Address; kind: number; venue: Hex; tokens: [Address, Address]; block: number }[];
 }
 
 const lc = (s: string) => s.toLowerCase();
@@ -108,9 +108,9 @@ export const updateIndex = (o: IndexOptions): Promise<Discovery> => run(o, false
 export const buildIndex = (o: IndexOptions): Promise<Discovery> => run(o, true);
 
 /** What the store holds, without a request. */
-export async function indexStatus(o: { chainId: number; store?: IndexStore }): Promise<Discovery> {
+export async function indexStatus(o: { chainId: number; store?: IndexStore; smallMax?: number }): Promise<Discovery> {
   const st = materialize(await (o.store ?? defaultStore).load(o.chainId));
-  return discovery(st, null, null);
+  return discovery(st, null, null, o.smallMax ?? SMALL_SOURCE_MAX);
 }
 
 /** Tokens whose symbol or name has the query's skeleton, or whose address is the query. */
@@ -127,7 +127,7 @@ export async function searchIndex(o: { chainId: number; store?: IndexStore }, qu
     out.push({
       token: venues[0].tokens.find((a) => lc(a) === t) ?? (t as Address),
       symbol: tx?.symbol ?? null, name: tx?.name ?? null, status: tx?.status ?? 'UNREAD', readAtBlock: tx?.readAtBlock ?? null,
-      venues: venues.map((v) => ({ source: v.source, kind: v.kind, venue: v.venue, block: v.block })),
+      venues: venues.map((v) => ({ source: v.source, kind: v.kind, venue: v.venue, tokens: [v.tokens[0], v.tokens[1]], block: v.block })),
     });
   }
   return out;
@@ -176,7 +176,7 @@ async function run(o: IndexOptions, layer2: boolean): Promise<Discovery> {
       if (e instanceof MeterStop) c.stopped = e.reason; else c.errors.push(why(e));
     }
     await c.q.catch((e) => { c.errors.push(`store: ${why(e)}`); });
-    return discovery(materialize(c.all), t, { requests: c.m.requests, stopped: c.stopped, errors: c.errors });
+    return discovery(materialize(c.all), t, { requests: c.m.requests, stopped: c.stopped, errors: c.errors }, o.smallMax ?? SMALL_SOURCE_MAX);
   });
 }
 
@@ -343,7 +343,7 @@ async function scanSources(
   });
 }
 
-function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | null): Discovery {
+function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | null, smallMax: number): Discovery {
   const r = st.run;
   const target = r ? r.target : null;
   const coverage: Coverage[] = [];
@@ -352,7 +352,7 @@ function discovery(st: IndexState, t: Target | null, run: Discovery['run'] | nul
     const counter = r?.counters[lc(source)] ?? null;
     const valid = !!k && k.from <= k.to;
     const complete = valid && target !== null && k!.from === 0 && k!.to >= target && k!.malformed === 0 && (counter === null || k!.logs === counter);
-    coverage.push({ source, kind, role, fromBlock: valid ? k!.from : null, toBlock: valid ? k!.to : null, complete, logs: k?.logs ?? 0, malformed: k?.malformed ?? 0, counter, large: !!k?.large || (counter !== null && counter > SMALL_SOURCE_MAX) });
+    coverage.push({ source, kind, role, fromBlock: valid ? k!.from : null, toBlock: valid ? k!.to : null, complete, logs: k?.logs ?? 0, malformed: k?.malformed ?? 0, counter, large: !!k?.large || (counter !== null && counter > smallMax) });
   };
   if (r) cov(r.hub, HUB_KIND, 'hub');
   const notCovered: Discovery['notCovered'] = [];

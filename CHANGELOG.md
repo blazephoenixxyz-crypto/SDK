@@ -1,13 +1,31 @@
 # Changelog
 
-## Unreleased — findToken (`@blazephoenix/sdk/find`)
+## 1.8.0 — findToken (on-chain discovery)
 
-- `findToken({ query, chainId, rpc })`: candidates for a name or ticker, proposed by the
-  CoinGecko and Dexscreener public search (third-party indexes, the trust point; a failed index
-  is listed in `sources` with its error) and read on your RPC: code, symbol, name, decimals,
-  depth at 1% and 5% impact over a ladder of USD sizes (a lower bound), and the balances of the
-  venues on the measured route. Ranked by measured depth; the first is labelled "most liquid",
-  never "official", and nothing is selected.
+- `findToken({ query, chainId, rpc })` (`@blazephoenix/sdk/find`): candidates for a name or
+  ticker, found on chain by default (`sources: "onchain"`): an index of the venues the Hub's
+  admitted factories created, built from their creation events on your own RPC and matched
+  against the symbols and names read there, so no third party sees the query. Layer 1 covers
+  every small source from block 0 and the recent 7-day window of the large ones (more than
+  250,000 creation events); `index: "full"` takes them down to block 0. `mode` and `discovery`
+  (block, coverage per source against its on-chain counter, `complete`) say what was searched;
+  an incomplete index labels the first candidate "most liquid of those found", and not found
+  in the covered range is not "does not exist". A failed index is listed in `sources` with its
+  error and never falls back to a third party. Found on chain is not endorsed: anyone can
+  create a venue.
+- The centralized search (CoinGecko and Dexscreener public search) is opt-in only:
+  `sources: "centralized"`, or `"both"` with each candidate's `agreement`. Those indexes then see
+  the query and are the trust point; a failed index is listed in `sources` with its error.
+- Every candidate is read on your RPC: code, symbol, name, decimals, depth at 1% and 5% impact
+  over a ladder of USD sizes (a lower bound), and the balances of the venues on the measured
+  route. On-chain matches are first ranked by what their venues hold in the bridge tokens in the
+  index's block; those under 0.1% of the deepest are counted and left out (`includeDust: true`
+  lists them). Ranked by measured depth; the first is labelled "most liquid", never "official",
+  and nothing is selected.
+- `updateIndex`, `buildIndex`, `searchIndex`, `indexStatus`, `MemoryStore` and `FileStore` run the
+  index on its own; `proposals` is the centralized search alone. A source's `large` flag in
+  `discovery.coverage`, and `layer2.pending`, use the `smallMax` the run scanned with, not the
+  default; `indexStatus({ smallMax })` takes it too.
 - Liquidity of Uniswap V4 venues, and of venue kinds whose balances do not sit at their address,
   is `NOT_MEASURED` with its reason, never 0. Fixed warnings: "most liquid" is not "official",
   impostors copy tickers, liquidity is not safety.

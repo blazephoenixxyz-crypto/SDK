@@ -4,7 +4,7 @@
 import { resilientFetch, type RetryOptions } from '../resilience.js';
 import { skeleton } from '../text.js';
 
-export interface SourceStatus { name: 'coingecko' | 'dexscreener'; ok: boolean; error?: string; note?: string }
+export interface SourceStatus { name: 'onchain' | 'coingecko' | 'dexscreener'; ok: boolean; error?: string; note?: string }
 export interface Proposal { address: string; source: SourceStatus['name'] }
 
 /** CoinGecko platform ids per chain; a chain without one is not searched there. */

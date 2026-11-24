@@ -1,5 +1,7 @@
-// @blazephoenix/sdk/find: find a token by name or ticker. Third-party indexes only PROPOSE
-// addresses; every candidate is then read on the caller's RPC (code, symbol, name, decimals),
+// @blazephoenix/sdk/find: find a token by name or ticker. By default candidates are PROPOSED by the
+// on-chain index (every venue the Hub's factories created, read from logs on the caller's RPC); with
+// sources 'centralized' or 'both', third-party indexes propose too. Every candidate is then read on
+// the caller's RPC (code, symbol, name, decimals),
 // checked for Unicode lookalikes, and ranked by the depth the BlazePhoenix Quoter MEASURES
 // (usdValue at a ladder of order sizes). Venue balances are shown beside depth, never instead
 // of it. Nothing is ever selected: the caller picks, and the warnings say why that is hard.
@@ -11,10 +13,17 @@ import { transportFrom, type RpcSource } from '../rpc.js';
 import type { UsdValue } from '../usd.js';
 import { lookalike, skeleton, tokenText, visibleText, type LookalikeReport } from '../text.js';
 import { runXray, type Transport as XrayTransport, type XrayReport } from '../xray/index.js';
-import { fromCoinGecko, fromDexscreener, type SourceStatus } from './sources.js';
+import { fromCoinGecko, fromDexscreener, type Proposal, type SourceStatus } from './sources.js';
+import { buildIndex, searchIndex, updateIndex, type Discovery, type IndexMatch, type IndexOptions } from './onchain/index.js';
+import { bridgesOf, floorAndQueue, measureMatches } from './onchain/prefilter.js';
+import { chainRpc } from './onchain/rpc.js';
+import { defaultStore, materialize, type IndexStore } from './onchain/store.js';
 
 export { lookalike, skeleton, tokenText, visibleText, type LookalikeReport } from '../text.js';
 export { COINGECKO_COIN_CAP, COINGECKO_PLATFORM, DEXSCREENER_CHAIN, matchesQuery, type SourceStatus } from './sources.js';
+export { buildIndex, indexStatus, searchIndex, SMALL_SOURCE_MAX, updateIndex, type Coverage, type Discovery, type IndexMatch, type IndexOptions } from './onchain/index.js';
+export { FileStore, MemoryStore, type IndexStore } from './onchain/store.js';
+export { PREFILTER_FLOOR_DIVISOR } from './onchain/prefilter.js';
 
 /** Order sizes in whole US dollars (the dollar token taken as 1 USD), smallest first. */
 export const DEFAULT_SIZES_USD: readonly number[] = [10, 100, 1_000, 10_000, 100_000, 1_000_000];
@@ -39,6 +48,12 @@ export const WARNINGS = {
   liquidityVsDepth: 'Liquidity is the token balances the venues hold, valued at the measured marginal price; depth is what the Quoter measures can be sold before 1% / 5% price impact. In concentrated-liquidity venues (V3, V4) much of the balance can sit outside the current price range: high liquidity can come with low depth. Candidates are ranked by depth.',
   v4: 'Liquidity of a Uniswap V4 venue is NOT_MEASURED: its balances sit in the shared PoolManager, not at the venue, and no per-venue balance is read or estimated.',
   trust: 'Candidates come from third-party indexes (CoinGecko, Dexscreener): they only propose addresses. Everything shown about a candidate is read on your RPC.',
+  thirdParties: 'Third parties saw this query: it was sent to CoinGecko and Dexscreener.',
+  notEndorsed: 'Found on chain is not endorsed: anyone can create a venue.',
+  /** The index did not cover every source to its target block: a deeper token may sit outside it. */
+  coverage: (range: string) => `On-chain coverage is incomplete (blocks ${range}; see discovery.coverage): the first candidate is the most liquid of those found, a deeper one may exist outside what was scanned.`,
+  noneFound: (range: string) => `none found in the covered range (blocks ${range}); not found is not "does not exist"`,
+  belowFloor: (n: number) => `${n} more below 0.1% of the deepest (includeDust: true lists them)`,
 } as const;
 
 const BASIS = "Depth: usdValue (the BlazePhoenix Quoter's netOut in the dollar token, the minimum over its vias) at each order size, "
@@ -70,6 +85,20 @@ export interface FindTokenRequest {
   fetch?: typeof fetch;
   maxCandidates?: number;
   reader?: FindReader;
+  /** Who proposes candidates: the on-chain index on `rpc` (default, never calls fetch), the
+   *  third-party indexes, or both. */
+  sources?: 'onchain' | 'centralized' | 'both';
+  /** Where the on-chain index is kept (default: in memory, shared by this module). */
+  store?: IndexStore;
+  /** 'layer1' (default): updateIndex; 'full': buildIndex, every source down to block 0. */
+  index?: 'layer1' | 'full';
+  /** Caps on the index run (time and requests); a stopped run leaves discovery.complete false. */
+  budgetMs?: number;
+  maxRequests?: number;
+  /** Keep the tokens below 0.1% of the deepest pre-filter measure (counted and left out by default). */
+  includeDust?: boolean;
+  /** The Hub whose factories are indexed (default: the live one in EMBEDDED_DEPLOYMENTS). */
+  hub?: Address;
 }
 
 export type Status = 'MEASURED' | 'NOT_MEASURED';
@@ -120,8 +149,15 @@ export interface Candidate {
   address: Address;
   /** 1 = deepest. Rank orders by measured depth; it does not pick. */
   rank: number;
-  label?: 'most liquid';
+  label?: 'most liquid' | 'most liquid of those found';
   sources: SourceStatus['name'][];
+  /** Who proposed it: 'onchain:<source>' (each factory or PoolManager whose log names it), 'coingecko', 'dexscreener'. */
+  proposedBy: string[];
+  /** Only with sources 'both'. */
+  agreement?: 'both' | 'onchain-only' | 'centralized-only';
+  /** The pre-filter measure (bridge balances of its venues, dollar-token base units) for a token the
+   *  on-chain index matched; null when none was measured. */
+  prefilterUsd?: bigint | null;
   hasCode: boolean | null;
   symbol: string | null;
   name: string | null;
@@ -133,9 +169,14 @@ export interface Candidate {
   reason?: string;
 }
 
+export type FindDiscovery = Discovery & { matched: number; belowFloor: number; depthMeasured: number };
+
 export interface FindTokenResult {
   query: string;
   chainId: number;
+  mode: 'onchain' | 'centralized' | 'both';
+  /** What the on-chain index covered; null with sources 'centralized' or when the index did not run. */
+  discovery: FindDiscovery | null;
   candidates: Candidate[];
   sources: SourceStatus[];
   /** Proposed addresses left out by maxCandidates. */
@@ -271,9 +312,11 @@ function rpcReader(chainId: number, rpc: RpcSource, client?: BlazePhoenix): Find
   };
 }
 
-async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId: number, address: Address, sources: SourceStatus['name'][], sizes: readonly number[]): Promise<Candidate> {
+async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId: number, p: Proposed, sizes: readonly number[]): Promise<Candidate> {
+  const address = p.address;
   const c: Candidate = {
-    address, rank: 0, sources, hasCode: null, symbol: null, name: null, decimals: null,
+    address, rank: 0, sources: p.sources, proposedBy: p.proposedBy, ...(p.agreement ? { agreement: p.agreement } : {}),
+    ...(p.prefilterUsd !== undefined ? { prefilterUsd: p.prefilterUsd } : {}), hasCode: null, symbol: null, name: null, decimals: null,
     lookalike: { suspicious: false, symbol: null, name: null },
     depth: notMeasured('not read'), liquidity: { venues: [], totalUsd: null, complete: false },
   };
@@ -305,6 +348,62 @@ async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId:
 
 const depthKey = (c: Candidate) => c.depth.upTo1pct?.usdOut ?? -1n;
 
+interface Proposed { address: Address; sources: SourceStatus['name'][]; proposedBy: string[]; agreement?: Candidate['agreement']; prefilterUsd?: bigint | null }
+
+const MODES = ['onchain', 'centralized', 'both'] as const;
+
+function centralized(fetchFn: typeof fetch, query: string, chainId: number): Promise<{ status: SourceStatus; proposals: Proposal[] }[]> {
+  return Promise.all([fromCoinGecko(fetchFn, query, chainId), fromDexscreener(fetchFn, query, chainId)]);
+}
+
+/** The third-party indexes alone (CoinGecko, Dexscreener): unverified addresses, nothing read on chain. */
+export async function proposals(req: { query: string; chainId: number; fetch?: typeof fetch }): Promise<{ proposals: { address: Address; sources: SourceStatus['name'][] }[]; sources: SourceStatus[] }> {
+  const query = tokenText(req.query, 64);
+  if (query.length === 0) throw new BlazeError('bad_request', 'query: give a name or ticker');
+  const chainId = resolveChain(req.chainId);
+  const answers = await centralized(req.fetch ?? globalThis.fetch, query, chainId);
+  const by = new Map<string, { address: Address; sources: SourceStatus['name'][] }>();
+  for (const a of answers) for (const p of a.proposals) {
+    const e = by.get(lc(p.address)) ?? { address: getAddress(lc(p.address)), sources: [] };
+    if (!e.sources.includes(p.source)) e.sources.push(p.source);
+    by.set(lc(p.address), e);
+  }
+  return { proposals: [...by.values()], sources: answers.map((a) => a.status) };
+}
+
+/** The on-chain index brought up to date on `rpc`, searched, and its matches given the pre-filter
+ *  measure in the index's block. A failed run is reported as the 'onchain' source, never thrown. */
+async function fromIndex(req: FindTokenRequest, chainId: number, query: string, reader: FindReader): Promise<{ status: SourceStatus; discovery: Discovery | null; matches: IndexMatch[]; measure: Map<string, bigint | null> }> {
+  const store = req.store ?? defaultStore;
+  const opts: IndexOptions = {
+    chainId, rpc: req.rpc!, store, ...(req.hub !== undefined ? { hub: req.hub } : {}),
+    ...(req.budgetMs !== undefined ? { budgetMs: req.budgetMs } : {}), ...(req.maxRequests !== undefined ? { maxRequests: req.maxRequests } : {}),
+  };
+  try {
+    const d = await (req.index === 'full' ? buildIndex : updateIndex)(opts);
+    const matches = await searchIndex({ chainId, store }, query);
+    const run = materialize(await store.load(chainId)).run;
+    // One block for every pre-filter read: the stored run's target, when this run reached it.
+    const pin = d.target && d.asOfBlock === d.target.target ? d.target : null;
+    const measure = await measureMatches(matches, {
+      rpc: chainRpc(req.rpc!), asOfBlock: pin?.target ?? null, blockHash: pin?.hash ?? null,
+      bridges: bridgesOf(chainId, run?.bridges), balanceKinds: BALANCE_KINDS, usdValue: (t, a, h) => reader.usdValue(t, a, h),
+    });
+    const notes: string[] = [];
+    if (d.run?.stopped) notes.push(`index run stopped (${d.run.stopped}): coverage is partial`);
+    if (d.run?.errors.length) notes.push(`${d.run.errors.length} index errors (discovery.run.errors)`);
+    return { status: { name: 'onchain', ok: true, ...(notes.length ? { note: notes.join('; ') } : {}) }, discovery: d, matches, measure };
+  } catch (e) {
+    return { status: { name: 'onchain', ok: false, error: msg(e) }, discovery: null, matches: [], measure: new Map() };
+  }
+}
+
+/** Blocks the index covered: the lowest source edge to its target block. */
+function covered(d: Discovery): string {
+  const from = d.coverage.map((c) => c.fromBlock).filter((b): b is number => b !== null);
+  return from.length && d.asOfBlock !== null ? `${Math.min(...from)}..${d.asOfBlock}` : 'none';
+}
+
 /** Find a token by name or ticker on one chain. Never selects one: see FindTokenResult.warnings. */
 export async function findToken(req: FindTokenRequest): Promise<FindTokenResult> {
   const query = tokenText(req.query, 64);
@@ -313,33 +412,67 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
   const sizes = validSizes(req.sizes ?? DEFAULT_SIZES_USD);
   const max = req.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   if (!Number.isSafeInteger(max) || max < 1) throw new BlazeError('bad_request', 'maxCandidates: a positive integer');
+  const mode = req.sources ?? 'onchain';
+  if (!MODES.includes(mode)) throw new BlazeError('bad_request', "sources: 'onchain', 'centralized' or 'both'");
+  if (req.index !== undefined && req.index !== 'layer1' && req.index !== 'full') throw new BlazeError('bad_request', "index: 'layer1' or 'full'");
+  if (mode !== 'centralized' && req.rpc === undefined) throw new BlazeError('bad_request', 'rpc: give your RPC for this chain (the on-chain index runs on it)');
   if (!req.reader && req.rpc === undefined) throw new BlazeError('bad_request', 'rpc: give your RPC for this chain');
   const reader = req.reader ?? rpcReader(chainId, req.rpc!, req.client);
-  const fetchFn = req.fetch ?? globalThis.fetch;
 
-  const answers = await Promise.all([fromCoinGecko(fetchFn, query, chainId), fromDexscreener(fetchFn, query, chainId)]);
-  const byAddr = new Map<string, { address: Address; sources: SourceStatus['name'][] }>();
-  for (const a of answers) for (const p of a.proposals) {
-    const k = lc(p.address);
-    const e = byAddr.get(k) ?? { address: getAddress(k), sources: [] };
-    if (!e.sources.includes(p.source)) e.sources.push(p.source);
+  // The on-chain mode never calls fetch: the third-party indexes are asked only when chosen.
+  const [onchain, answers] = await Promise.all([
+    mode === 'centralized' ? null : fromIndex(req, chainId, query, reader),
+    mode === 'onchain' ? null : centralized(req.fetch ?? globalThis.fetch, query, chainId),
+  ]);
+  const byAddr = new Map<string, Proposed>();
+  const add = (address: string, source: SourceStatus['name'], by: string | null) => {
+    const k = lc(address);
+    const e = byAddr.get(k) ?? { address: getAddress(k), sources: [], proposedBy: [] };
+    if (!e.sources.includes(source)) e.sources.push(source);
+    if (by !== null && !e.proposedBy.includes(by)) e.proposedBy.push(by);
     byAddr.set(k, e);
+  };
+  for (const m of onchain?.matches ?? []) {
+    add(m.token, 'onchain', null);
+    for (const v of m.venues) add(m.token, 'onchain', `onchain:${getAddress(v.source)}`);
+    byAddr.get(lc(m.token))!.prefilterUsd = onchain!.measure.get(lc(m.token)) ?? null;
   }
-  const all = [...byAddr.values()].sort((x, y) => y.sources.length - x.sources.length || (lc(x.address) < lc(y.address) ? -1 : 1));
-  const picked = all.slice(0, max);
-  const candidates = await Promise.all(picked.map((p) => readCandidate(reader, req, chainId, p.address, p.sources, sizes)));
+  for (const a of answers ?? []) for (const p of a.proposals) add(p.address, p.source, p.source);
+  if (mode === 'both') for (const e of byAddr.values()) {
+    const on = e.sources.includes('onchain'), off = e.sources.some((s) => s !== 'onchain');
+    e.agreement = on && off ? 'both' : on ? 'onchain-only' : 'centralized-only';
+  }
+  const includeDust = req.includeDust === true;
+  const { queue, belowFloor } = floorAndQueue([...byAddr.values()], includeDust);
+  const picked = queue.slice(0, max);
+  const candidates = await Promise.all(picked.map((p) => readCandidate(reader, req, chainId, p, sizes)));
   candidates.sort((x, y) => {
     const a = depthKey(x), b = depthKey(y);
     return a === b ? (lc(x.address) < lc(y.address) ? -1 : 1) : (b > a ? 1 : -1);
   });
   candidates.forEach((c, i) => { c.rank = i + 1; });
-  if (candidates[0]?.depth.status === 'MEASURED') candidates[0].label = 'most liquid';
+  const d = onchain?.discovery ?? null;
+  // Most liquid of what the index covered: an incomplete or failed index cannot say more.
+  const complete = mode === 'centralized' || d?.complete === true;
+  if (candidates[0]?.depth.status === 'MEASURED') candidates[0].label = complete ? 'most liquid' : 'most liquid of those found';
 
   const q = skeleton(query);
   const sameTicker = candidates.filter((c) => c.symbol !== null && skeleton(c.symbol) === q).length;
   // Absent is not zero: a symbol not read is counted apart, never as another ticker.
   const unread = candidates.filter((c) => c.symbol === null && c.hasCode !== false).length;
-  const warnings: string[] = [WARNINGS.mostLiquid, WARNINGS.dyor(sameTicker, unread), WARNINGS.notSafety, WARNINGS.liquidityVsDepth, WARNINGS.trust];
+  const warnings: string[] = [WARNINGS.mostLiquid, WARNINGS.dyor(sameTicker, unread), WARNINGS.notSafety, WARNINGS.liquidityVsDepth];
+  if (mode !== 'centralized') warnings.push(WARNINGS.notEndorsed);
+  if (mode !== 'onchain') warnings.push(WARNINGS.trust, WARNINGS.thirdParties);
+  if (d && !d.complete) warnings.push(WARNINGS.coverage(covered(d)));
+  if (belowFloor > 0 && !includeDust) warnings.push(WARNINGS.belowFloor(belowFloor));
+  if (mode === 'onchain' && d && candidates.length === 0) warnings.push(WARNINGS.noneFound(covered(d)));
   if (candidates.some((c) => c.liquidity.venues.some((v) => V4_KINDS.includes(v.kind)))) warnings.push(WARNINGS.v4);
-  return { query, chainId, candidates, sources: answers.map((a) => a.status), omitted: all.length - picked.length, warnings, basis: BASIS };
+  const discovery: FindDiscovery | null = d && onchain
+    ? { ...d, matched: onchain.matches.length, belowFloor, depthMeasured: candidates.filter((c) => c.depth.status === 'MEASURED').length }
+    : null;
+  return {
+    query, chainId, mode, discovery, candidates,
+    sources: [...(onchain ? [onchain.status] : []), ...(answers ?? []).map((a) => a.status)],
+    omitted: queue.length - picked.length, warnings, basis: BASIS,
+  };
 }

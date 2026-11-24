@@ -25,7 +25,7 @@ const cp = (rt: bigint, rp: bigint, x: bigint) => (rp * x) / (rt + x);
 test('[vector] a Cyrillic impostor of the ticker is listed, flagged, and the real one is not flagged', async () => {
   const real = addr(0x1001), fake = addr(0x1002);
   const { reader } = fakeReader({ [lower(real)]: tok('PEPE', venue(0x2001, 0, 1_000_000n)), [lower(fake)]: tok('РЕРЕ', venue(0x2002, 0, 1_000n)) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(real, 'PEPE'), dexPair(fake, 'РЕРЕ')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(real, 'PEPE'), dexPair(fake, 'РЕРЕ')] } }) });
   const imp = r.candidates.find((c) => c.address === fake)!;
   assert.ok(imp, 'impostor listed');
   assert.equal(imp.lookalike.suspicious, true);
@@ -54,7 +54,7 @@ test('[vector] three tokens use the ticker: the DYOR warning counts them, a name
   const other = addr(0x3009);
   toks[lower(other)] = tok('PEPE2', venue(0x4009, 0, 5_000n), { name: 'Pepe' });
   pairs.push(dexPair(other, 'PEPE2', 'Pepe'));
-  const r = await findToken({ query: 'pepe', chainId: 8453, reader: fakeReader(toks).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs } }) });
+  const r = await findToken({ sources: 'centralized', query: 'pepe', chainId: 8453, reader: fakeReader(toks).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs } }) });
   assert.equal(r.candidates.length, 4);
   assert.ok(r.warnings.includes(WARNINGS.dyor(3)));
   assert.equal(r.warnings[0], WARNINGS.mostLiquid);
@@ -67,7 +67,7 @@ test('[vector] concentrated venue out of range: high liquidity, low depth, ranke
   const conc = addr(0x5001), deep = addr(0x5002);
   const cv = venue(0x6001, 1, 10_000n, 10_000_000n);
   const { reader } = fakeReader({ [lower(conc)]: tok('PEPE', cv), [lower(deep)]: tok('PEPE', venue(0x6002, 0, 1_000_000n)) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(conc, 'PEPE'), dexPair(deep, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(conc, 'PEPE'), dexPair(deep, 'PEPE')] } }) });
   const [first, second] = r.candidates;
   assert.equal(first.address, deep);
   assert.equal(first.label, 'most liquid');
@@ -88,7 +88,7 @@ test('[vector] concentrated venue out of range: high liquidity, low depth, ranke
 // Mutant: fromCoinGecko returns ok:true on a thrown search -> source failure hidden.
 test('[vector] one index down: listed with its error, the other still proposes', async () => {
   const a = addr(0x7001);
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0x7101, 0, 1000n)) }).reader, fetch: fakeFetch({ cg: 'down', dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0x7101, 0, 1000n)) }).reader, fetch: fakeFetch({ cg: 'down', dex: { pairs: [dexPair(a, 'PEPE')] } }) });
   assert.deepEqual(r.sources[0], { name: 'coingecko', ok: false, error: 'getaddrinfo ENOTFOUND api.coingecko.com' });
   assert.deepEqual(r.sources[1], { name: 'dexscreener', ok: true });
   assert.equal(r.candidates.length, 1);
@@ -98,7 +98,7 @@ test('[vector] one index down: listed with its error, the other still proposes',
 test('[vector] no code at the address: hasCode false, no depth pretended, nothing quoted', async () => {
   const a = addr(0x8001);
   const f = fakeReader({ [lower(a)]: tok('PEPE', venue(0x8101, 0, 1000n), { code: false }) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
   const c = r.candidates[0];
   assert.equal(c.hasCode, false);
   assert.equal(c.depth.status, 'NOT_MEASURED');
@@ -129,14 +129,14 @@ for (const decimals of [0, 6, 18]) {
   test(`[range] decimals ${decimals}: the 10 USD size is 10 whole tokens at 1 USD`, async () => {
     const a = addr(0x9000 + decimals), u = 1_000_000_000n;
     const v = { pairAddress: addr(0x9100 + decimals), kind: 0, pair: USDC, rt: u * 10n ** BigInt(decimals), rp: u * E6, balT: 0n, balP: 0n, linear: true };
-    const r = await findToken({ query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: fakeReader({ [lower(a)]: { symbol: 'PEPE', name: 'Pepe', decimals, venue: v } }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+    const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: fakeReader({ [lower(a)]: { symbol: 'PEPE', name: 'Pepe', decimals, venue: v } }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
     assert.equal(r.candidates[0].depth.rungs[0].amountIn, 10n * 10n ** BigInt(decimals));
   });
 }
 test('[range] decimals 0 at 1000 USD per token: sizes below one base unit are skipped, depth still measured', async () => {
   const a = addr(0x9201);
   const v = { pairAddress: addr(0x9202), kind: 0, pair: USDC, rt: 1_000_000n, rp: 1_000_000n * 1000n * E6, balT: 0n, balP: 0n };
-  const r = await findToken({ query: 'PEPE', chainId: 8453, sizes: [10, 100, 1000, 10_000], reader: fakeReader({ [lower(a)]: { symbol: 'PEPE', name: 'Pepe', decimals: 0, venue: v } }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, sizes: [10, 100, 1000, 10_000], reader: fakeReader({ [lower(a)]: { symbol: 'PEPE', name: 'Pepe', decimals: 0, venue: v } }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
   const d = r.candidates[0].depth;
   assert.equal(d.rungs[0].reason, 'size below one base unit');
   assert.equal(d.status, 'MEASURED');
@@ -147,7 +147,7 @@ test('[range] decimals 0 at 1000 USD per token: sizes below one base unit are sk
 test('[vector] the same address in two cases from two indexes is one candidate with both sources', async () => {
   const a = addr(0xabcdef);
   const r = await findToken({
-    query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xa001, 0, 1000n)) }).reader,
+    sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xa001, 0, 1000n)) }).reader,
     fetch: fakeFetch({ cg: { coins: [{ id: 'pepe', symbol: 'pepe', name: 'Pepe' }], details: { pepe: { platforms: { base: a } } } }, dex: { pairs: [dexPair(lower(a), 'PEPE')] } }),
   });
   assert.equal(r.candidates.length, 1);
@@ -159,7 +159,7 @@ test('[vector] the same address in two cases from two indexes is one candidate w
 test('[vector] V4 venue liquidity is NOT_MEASURED with its reason, never 0; an external kind is not read', async () => {
   const a = addr(0xb001), b = addr(0xb002);
   const f = fakeReader({ [lower(a)]: tok('PEPE', venue(0xb101, 4, 1_000_000n)), [lower(b)]: tok('PEPE', venue(0xb102, 9, 1000n)) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE'), dexPair(b, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE'), dexPair(b, 'PEPE')] } }) });
   const v4 = r.candidates.find((c) => c.address === a)!.liquidity;
   assert.equal(v4.venues[0].status, 'NOT_MEASURED');
   assert.equal(v4.venues[0].reason, 'V4: balances sit in the shared PoolManager, not at the venue');
@@ -173,7 +173,7 @@ test('[vector] V4 venue liquidity is NOT_MEASURED with its reason, never 0; an e
 // Mutant: WETH valued at 1 instead of usdValue of one WETH -> total off by 3000x.
 test('[vector] a WETH-paired venue is valued at the measured WETH price', async () => {
   const a = addr(0xc001);
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xc101, 0, 300_000n, 300_000n, WETH)) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xc101, 0, 300_000n, 300_000n, WETH)) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
   const total = r.candidates[0].liquidity.totalUsd!;
   assert.ok(total > 599_000n * E6 && total <= 600_000n * E6, String(total));
 });
@@ -181,7 +181,7 @@ test('[vector] a WETH-paired venue is valued at the measured WETH price', async 
 // Mutant: add a selected/best/official field anywhere in the result.
 test('[vector] never selects: no selected, best or official key anywhere in the result', async () => {
   const a = addr(0xd001);
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xd101, 0, 1000n)) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', venue(0xd101, 0, 1000n)) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [dexPair(a, 'PEPE')] } }) });
   const keys: string[] = [];
   JSON.stringify(r, (k, v) => { keys.push(k); return typeof v === 'bigint' ? v.toString() : v; });
   for (const k of ['selected', 'best', 'official', 'recommended']) assert.ok(!keys.includes(k), k);
@@ -191,9 +191,9 @@ test('[vector] never selects: no selected, best or official key anywhere in the 
 test('[unit] bad requests throw bad_request', async () => {
   // Both indexes down, so a mutant that lets a bad request through resolves (red) without the network.
   const reader = fakeReader({}).reader, fetch = fakeFetch({});
-  await assert.rejects(findToken({ query: ' \u200b ', chainId: 8453, reader, fetch }), /query/);
-  await assert.rejects(findToken({ query: 'PEPE', chainId: 8453, reader, fetch, sizes: [100, 10] }), /sizes/);
-  await assert.rejects(findToken({ query: 'PEPE', chainId: 8453, fetch }), /rpc: give your RPC/);
+  await assert.rejects(findToken({ sources: 'centralized', query: ' \u200b ', chainId: 8453, reader, fetch }), /query/);
+  await assert.rejects(findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader, fetch, sizes: [100, 10] }), /sizes/);
+  await assert.rejects(findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, fetch }), /rpc: give your RPC/);
 });
 
 // --- Review of PR #22 (CodeRabbit): one block for depth, a bounded body read, a probe retried at 0. ---
@@ -208,7 +208,7 @@ const dexOnly = (a: string) => fakeFetch({ cg: { coins: [], details: {} }, dex: 
 test('[vector] price moving 1% per block: every rung reads the probe block, the drift is not reported as impact', async () => {
   const a = addr(0xe001);
   const f = fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe101)) }, { driftBps: 100n });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
   const d = r.candidates[0].depth;
   const probeHash = hashOf(1);
   assert.equal(f.calls.log[0].blockHash, undefined, 'the probe reads the head');
@@ -223,7 +223,7 @@ test('[vector] the WETH price that values a WETH-paired venue is read in the pro
   const a = addr(0xe002);
   const v = linear1(0xe102, WETH);
   const f = fakeReader({ [lower(a)]: tok('PEPE', v) }, { driftBps: 100n });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: f.reader, fetch: dexOnly(a) });
   const wethCalls = f.calls.log.filter((c) => c.token === WETH);
   assert.equal(wethCalls.length, 1);
   assert.equal(wethCalls[0].blockHash, hashOf(1));
@@ -238,7 +238,7 @@ test('[vector] the WETH price that values a WETH-paired venue is read in the pro
 test('[vector] the probe block lost to a reorg: the rung records the reason and the ladder stops', async () => {
   const a = addr(0xe003);
   const f = fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe103)) }, { reorgAfter: 1 });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
   const d = r.candidates[0].depth;
   assert.equal(d.rungs.length, 2);
   assert.equal(d.rungs[0].impactBps, 0);
@@ -251,7 +251,7 @@ test('[vector] the probe block lost to a reorg: the rung records the reason and 
 test('[vector] a probe that carries no block hash: depth NOT_MEASURED, no rung read at another block', async () => {
   const a = addr(0xe004);
   const f = fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe104)) }, { noHash: true });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
   assert.equal(r.candidates[0].depth.status, 'NOT_MEASURED');
   assert.equal(r.candidates[0].depth.reason, 'price probe carried no block hash: the sizes cannot be read in its block');
   assert.equal(f.calls.usdValue, 1);
@@ -273,7 +273,7 @@ test('[vector] the rpc adapter forwards the probe block hash to client.usdValue'
       return encodeFunctionResult({ abi: erc20, functionName, result } as never);
     },
   };
-  const r = await findToken({ query: 'PEPE', chainId: 8453, rpc, client, sizes: [10, 100], fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, rpc, client, sizes: [10, 100], fetch: dexOnly(a) });
   assert.equal(r.candidates[0].depth.status, 'MEASURED');
   assert.deepEqual(reqs.map((q) => q.blockHash), [undefined, hashOf(1), hashOf(1)]);
 });
@@ -288,7 +288,7 @@ test('[vector] an index that sends headers then stalls its body fails by name; t
   const fetchFn = (async (input: any, init?: any) => (String(input).startsWith('https://api.dexscreener.com/') ? stalled : cg(input, init))) as typeof fetch;
   let done: Awaited<ReturnType<typeof findToken>> | undefined;
   let failed: unknown;
-  findToken({ query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe106)) }).reader, fetch: fetchFn }).then((x) => { done = x; }, (e) => { failed = e; });
+  findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe106)) }).reader, fetch: fetchFn }).then((x) => { done = x; }, (e) => { failed = e; });
   for (let i = 0; i < 50 && done === undefined && failed === undefined; i++) {
     await new Promise((res) => setImmediate(res));
     t.mock.timers.tick(10_000);
@@ -307,7 +307,7 @@ test('[range] probe quoting 0 at one whole token is retried at 1000: sizes price
   const a = addr(0xe007);
   const v = { pairAddress: addr(0xe107), kind: 0, pair: USDC, rt: 10n ** 8n * E18, rp: E6, balT: 0n, balP: 0n, linear: true };
   const f = fakeReader({ [lower(a)]: tok('PEPE', v) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, sizes: [10, 100], reader: f.reader, fetch: dexOnly(a) });
   const d = r.candidates[0].depth;
   assert.deepEqual(f.calls.log.slice(0, 2).map((c) => c.amountIn), [E18, 1000n * E18]);
   assert.equal(d.status, 'MEASURED');
@@ -321,7 +321,7 @@ test('[range] probe quoting 0 up to 10^12 whole tokens: five probes, then NOT_ME
   const a = addr(0xe008);
   const v = { pairAddress: addr(0xe108), kind: 0, pair: USDC, rt: 10n ** 30n * E18, rp: 1n, balT: 0n, balP: 0n, linear: true };
   const f = fakeReader({ [lower(a)]: tok('PEPE', v) });
-  const r = await findToken({ query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: f.reader, fetch: dexOnly(a) });
   assert.deepEqual(f.calls.log.map((c) => c.amountIn), [E18, 10n ** 3n * E18, 10n ** 6n * E18, 10n ** 9n * E18, 10n ** 12n * E18]);
   assert.equal(r.candidates[0].depth.status, 'NOT_MEASURED');
   assert.equal(r.candidates[0].depth.reason, 'price probe quoted 0 dollar-token units at one whole token and at up to 10^12 whole tokens');
@@ -333,11 +333,11 @@ test('[range] probe quoting 0 up to 10^12 whole tokens: five probes, then NOT_ME
 test('[vector] symbol not read on any candidate: the ticker count is NOT_MEASURED, never 0', async () => {
   const a = addr(0xe009), b = addr(0xe00a), c = addr(0xe00b), d = addr(0xe00c);
   const pairs = [dexPair(a, 'PEPE'), dexPair(b, 'PEPE')];
-  const none = await findToken({ query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', undefined, { symbol: null }), [lower(b)]: tok('PEPE', undefined, { symbol: null }) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs } }) });
+  const none = await findToken({ sources: 'centralized', query: 'PEPE', chainId: 8453, reader: fakeReader({ [lower(a)]: tok('PEPE', undefined, { symbol: null }), [lower(b)]: tok('PEPE', undefined, { symbol: null }) }).reader, fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs } }) });
   assert.ok(!none.warnings.includes(WARNINGS.dyor(0)), 'no "0 tokens use this ticker"');
   assert.ok(none.warnings.includes("How many tokens use this ticker is NOT_MEASURED: no candidate's symbol was read (2 not read); impostors copy tickers; do your own research."));
   const mixed = await findToken({
-    query: 'PEPE', chainId: 8453,
+    sources: 'centralized', query: 'PEPE', chainId: 8453,
     reader: fakeReader({ [lower(a)]: tok('PEPE', linear1(0xe109)), [lower(b)]: tok('PEPE', undefined, { symbol: null }), [lower(c)]: tok('PEPE', undefined, { code: false }), [lower(d)]: tok('PEPE2') }).reader,
     fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs: [...pairs, dexPair(c, 'PEPE'), dexPair(d, 'PEPE')] } }),
   });
