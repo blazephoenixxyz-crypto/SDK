@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: { index: 'src/index.ts', 'xray/index': 'src/xray/index.ts' },
+  entry: { index: 'src/index.ts', 'xray/index': 'src/xray/index.ts', 'find/index': 'src/find/index.ts' },
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,

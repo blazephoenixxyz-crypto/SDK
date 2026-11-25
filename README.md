@@ -208,10 +208,11 @@ The USD value of an amount, read on the Quoter only: no oracle, no price API. Th
 - **"not measured", never 0.** A via whose call reverts, whose route has 0 hops or whose `netOut` is 0
   measured nothing. If no via measured, `usdValue` is `null` and `usd` is `'not measured'`.
 - **One block, pinned by hash.** The client reads the block header (`eth_getBlockByNumber`, `latest`
-  or your `blockNumber`) and runs every eth_call of one `usdValue` at that block's hash (EIP-1898,
-  `requireCanonical: true`), never at a block number: after a reorg a number names another block.
-  The block read inside the call must equal the header's number, and a pinned `blockNumber` must
-  get its own header; otherwise it is an `rpc_error`.
+  or your `blockNumber`; `eth_getBlockByHash` for your `blockHash`) and runs every eth_call of
+  one `usdValue` at that block's hash (EIP-1898, `requireCanonical: true`), never at a block
+  number: after a reorg a number names another block. The result's `blockHash` is that hash. The
+  block read inside the call must equal the header's number, and a pinned `blockNumber` or
+  `blockHash` must get its own header; otherwise it is an `rpc_error`.
 - **"not measured" is a result, not an error.** If the node loses the block between the calls
   (a reorg), discovery restarts on a new block, at most `USD_SNAPSHOT_TRIES` (2) snapshots. If the
   block is lost every time, or the node takes no `blockHash` block parameter, `usdValue` returns
@@ -225,6 +226,149 @@ The USD value of an amount, read on the Quoter only: no oracle, no price API. Th
   check of a deployment taken from the remote registry). On Arbitrum and Robinhood Chain the block
   number is read from ArbSys (`arbBlockNumber()`), because `block.number` there is the L1 block,
   not the block RPC tags count. `usdFromVias` is the same computation without RPC.
+
+## Cross-chain quoted price
+
+```ts
+const p = await crossChainPrice({ client: blaze, chains: [
+  { chain: 'base', token: '0x…', amount: '1' },          // whole tokens, converted per chain
+  { chain: 'arbitrum', token: '0x…', amountIn: 10n ** 18n }, // or base units
+] });
+// p.chains[i].priceUsd (USD per whole token × 1e18, or null), .derivation, .impactBps,
+// .impactBasis, .impactSource; p.minPriceUsd, p.maxPriceUsd, p.spreadBps, p.skewSeconds
+
+const a = await crossChainAverage({ client: blaze, maxSkewSeconds: 120, chains: [
+  { chain: 'base', token: '0x…', amountIn: 10n ** 18n, depthAmountIn: 10n ** 20n },
+  { chain: 'arbitrum', token: '0x…', amountIn: 10n ** 18n, depthAmountIn: 10n ** 20n },
+] });
+// a.medianPriceUsd (the main value), a.depthWeightedPriceUsd, a.included, a.excluded
+```
+
+The QUOTED price of one token on several chains: `usdValue` on each chain, on each chain's own
+RPC, in parallel. Every number is a price the BlazePhoenix Quoter quotes for `amountIn` at one
+block; nothing here is an executed price.
+
+- **The token is the one you name on each chain**: `ETH`, `WETH`, `USDC` or `USDG` (the SDK's own
+  address on that chain) or an address. Any other symbol is refused; tokens are never matched by
+  on-chain symbol or name. A token that does not exist on a chain: leave that chain out (do not
+  list it); there is no fallback to another token.
+- **What a price is.** The `netOut` the Quoter quotes for that size, after the 0.28 % fee and
+  with the price impact at that size; the dollar token (USDC; USDG on Robinhood Chain) is taken
+  as 1 USD; the minimum over the vias `usdValue` tries (direct, via WETH, via the route's
+  tokens). Read on your RPC; no volume is read.
+- **The size: `amountIn` or `amount`, exactly one.** `amountIn` is in base units of the token on
+  that chain. `amount` is a decimal string in whole tokens (`'1'`, `'0.5'`), converted on each
+  chain with the `decimals()` read on that chain, so every chain quotes the same economic size
+  (the conversion is checked against the decimals read in the pinned block). Both or neither
+  throws `bad_request`; more fraction digits than the token has, or a `decimals()` that fails,
+  makes that chain `'not_measured'` with its reason, nothing quoted. `depthAmountIn` /
+  `depthAmount` work the same way.
+- **Integers, rounded down.** A price is USD per whole token × 1e18 (`USD_E18`),
+  `usdValue · 10^tokenDecimals · 1e18 / (amountIn · 10^dollarDecimals)`; `formatQuotedUsd`
+  formats it. A chain that measured nothing, or a price below 1e-18 USD, is `'not_measured'` with
+  its reason, never 0. A malformed request (unknown symbol, a chain twice, no client) throws.
+- **Median first.** `medianPriceUsd` is the median of the included chains (two middle prices:
+  their mean, rounded down). `spreadBps = (max − min) · 10000 / min` and `skewSeconds` (newest −
+  oldest block timestamp) are `null` with fewer than two chains; with no chain measured the status
+  is `'not_measured'` and there is no number. `maxSkewSeconds` excludes a chain whose block is
+  older than the newest measured block by more than that, and says so in `excluded`.
+- **Weighted by depth.** `depthWeightedPriceUsd = Σ Dᵢ·pᵢ / Σ Dᵢ`, where each chain also quotes
+  `depthAmountIn` in the same block and `Dᵢ = (a₂ − a₁) · p₁ · p₂ / ((p₁ − p₂) · 10^decimals)`:
+  for a constant-product curve 1/p is affine in the order size, and D is the USD depth the two
+  quotes measure (less impact between the sizes → more weight; no threshold). The sum is exact
+  in fractions, rounded down once. If a chain's second price is not below its first, its depth is
+  not measured: `depthWeightedPriceUsd` is `null`, `depthWeightedReason` names the chain, and the
+  median stands.
+- **Derivation.** Each chain's `derivation` is taken from `usdValue`, not recomputed: `path`, the
+  via whose value is the minimum (`'TOKEN → WETH → USDC'`; SDK constants by symbol, other tokens
+  by address); its `legs` (`amountIn → netOut` in base units, the leg's `impactBps`, the route's
+  `hops` with each venue's address, `kind`, `amountIn` and `out`, and the `bridges` between hops);
+  `scaledFrom` when the second leg was scaled from a reference amount of the middle token; and
+  `vias`, every via tried with its status, value and reason.
+- **Impact.** `impactBps` is the Quoter's `Route.expectedImpactBps` for the first leg of that via
+  (the leg quoted at `amountIn`), from the same `previewPlan` answer as the price: no extra RPC.
+  The Solver computes `expectedImpactBps` as the mean of its legs' impacts weighted by each leg's
+  amount, not compounded across hops. `impactSource` is `'quoter'`. `impactBasis` is
+  `'measured'` when every venue of that route has a kind the Quoter reads reserves or
+  concentrated liquidity for, and `'modeled'` when any venue has another kind (V4, V4-native,
+  external wrapper): the Quoter then uses a constant default impact for it, the number is kept,
+  and `impactNote` names those venues. When the chain is not measured, or the token is the
+  dollar token itself (nothing is quoted), `impactBps`, `impactBasis` and `impactSource` are
+  `null` and `impactNote` says why; never 0. The second size is quoted under the first quote's
+  block hash (`usdValue({ blockHash })`), not its height: after a reorg that replaced that block,
+  or from another block, the second size is not measured either: no price, no impact.
+- `aggregateQuotedPrices` is the same aggregation without RPC; `quotedUnitPriceUsd` is the price
+  of one reading; `wholeToBase` converts whole tokens to base units; `impactKindMeasured(kind)`
+  is the Quoter's kind table. `usdValue` now also returns `blockTimestamp`, from the header whose
+  hash pinned the reads, and `blockHash`, that hash; `usdValue({ blockHash })` reads the block
+  with that hash or throws `rpc_error`. Each `UsdLeg` carries the Quoter's `impactBps` and
+  `route` (additive fields).
+
+## Find a token by name
+
+```ts
+import { findToken } from '@blazephoenix/sdk/find';
+
+const r = await findToken({ query: 'PEPE', chainId: 8453, rpc: 'https://your-node.example' });
+// r.candidates: address, rank, label ('most liquid' on the first only), proposedBy, hasCode,
+// symbol / name / decimals read on your RPC, lookalike, depth, liquidity (and xray, when asked)
+// r.mode: 'onchain' (the default); r.discovery: the index's block, coverage per source, complete
+// r.sources: [{ name: 'onchain', ok, error? }]; r.warnings; r.basis
+```
+
+Candidates for a name or ticker, found on chain and ranked by the depth your RPC measures. It
+never picks one: the result has no `selected` or `best` field, and the choice stays with you.
+
+- **Found on chain, by default.** The candidates come from an index of the venues that the
+  Hub's admitted factories created, built from their creation events on your RPC, and matched
+  against the symbols and names read there. No third party sees the query: `fetch` is never
+  called. Layer 1 covers every small source from block 0 and the recent 7-day window of the
+  large ones (more than 250,000 creation events); later calls only walk up.
+  `index: 'full'` also takes the large sources down to block 0. The index lives in `store`
+  (in memory by default; `FileStore` keeps it on disk). A store holds one Hub's index per chain:
+  a run refuses a store with another Hub's cursor. One writer per directory and chain: runs in one
+  process wait for each other on any `FileStore` with the same `dir` string (compared as written,
+  trailing slashes removed: `./idx` and an absolute path to it are two locks), but two processes must not
+  update one directory at once. A custom `IndexStore` must make each `append`
+  call atomic (all its operations stored or none). `indexStatus` uses the default `smallMax`
+  unless you pass the one the index was built with. `r.discovery` says what was covered:
+  the block, each source's range and its count against the on-chain counter, and whether the
+  index is complete. When it is not, the first label reads "most liquid of those found"; not
+  found in the covered range is not "does not exist". An index that fails is listed in
+  `sources` with its error and gives no candidates; it never falls back to a third party.
+- **Trust point: your RPC. Found on chain is not endorsed.** Anyone can create a venue: a match
+  only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
+  venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
+  deepest are counted in the warnings and left out (`includeDust: true` lists them, still within
+  `maxCandidates`: if `omitted` is above 0, raise `maxCandidates` to see the rest). That
+  measure, `prefilterUsd`, is a lower bound: venues paired with other tokens, venues whose
+  balances do not sit at their address, and unread balances add nothing.
+  Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on
+  your RPC.
+- **Centralized search: opt-in only.** `sources: 'centralized'` asks the CoinGecko and
+  Dexscreener public search instead, without keys; `sources: 'both'` asks both and gives each
+  candidate an `agreement`. Those indexes then see the query and become a trust point: they
+  only propose, and can miss a token, list an impostor, or be down. A failed index is listed in
+  `sources` with its error, and the result does not pretend to be complete. `fetch` is
+  injectable.
+- **"Most liquid" is not "official".** The label on the first candidate says it has the deepest
+  measured depth; no list here is official. Impostors copy tickers: the warnings count how many
+  candidates read as the ticker, and `lookalike` flags hidden characters, mixed scripts,
+  letters from other scripts that look like ASCII, and compatibility forms.
+- **Depth.** `usdValue` at each order size (`sizes`, whole USD, default 10 to 1,000,000):
+  `upTo1pct` and `upTo5pct` are the largest sizes whose impact, against the smallest size and
+  rounded up, stays within 1% and 5%. The ladder makes this a lower bound: "sells up to N before
+  1% impact". Ranking uses `upTo1pct`.
+- **Liquidity is not depth.** `liquidity` is the token balances the venues on the measured route
+  hold, valued at the measured price (the candidate at its smallest measured size, the dollar
+  token at 1, WETH at the `usdValue` of one WETH). In concentrated venues (V3, V4) much of it can
+  sit outside the current price range: high liquidity with low depth is possible.
+- **NOT_MEASURED, never 0.** A Uniswap V4 venue keeps its balances in the shared PoolManager, not
+  at the venue, so its liquidity is `NOT_MEASURED` with that reason. So is any venue kind whose
+  balances are not known to sit at its address, and any token that is neither the candidate, the
+  dollar token nor WETH. No code at an address: `hasCode: false` and no depth is quoted.
+- **Liquidity is not safety.** It can be withdrawn at any time. Pass `xray: { transport }` to run
+  the X-Ray on each candidate with code (off by default).
 
 ## Errors
 

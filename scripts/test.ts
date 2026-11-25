@@ -23,6 +23,10 @@ import { phoenixCheck } from '../src/checks.js';
 import { BlazeError, decodeBlazeError, decodeRevertData, untrustedText } from '../src/errors.js';
 import { BlazePhoenix, deepLink } from '../src/client.js';
 import { toJSON } from '../src/json.js';
+import {
+  USD_E18, aggregateQuotedPrices, crossChainAverage, crossChainPrice, formatQuotedUsd, impactKindMeasured, quotedUnitPriceUsd, wholeToBase,
+  type QuotedDepthPoint, type QuotedPriceAggregate, type QuotedPricePoint,
+} from '../src/crossChain.js';
 import { MULTICALL3, MULTICALL3_ABI, USD_MAX_VIAS, usdFromVias, type UsdReadings } from '../src/usd.js';
 import type { Address, Hex, Hop, Preview, Route } from '../src/types.js';
 
@@ -309,12 +313,13 @@ interface MockOpts {
   exactPool?: Address;                       // previewPlanExact prices a different pool
   // previewPlan per pair: the netOut (and optionally the hops) the Quoter answers, or its revert data
   // previewPlan per pair: `at` is the block it runs in (height, and gen = reorgs at that height)
-  usd?: (tIn: Address, tOut: Address, amountIn: bigint, at: MockBlock) => { netOut: bigint; hops?: Hop[] } | { revert: Hex };
+  usd?: (tIn: Address, tOut: Address, amountIn: bigint, at: MockBlock) => { netOut: bigint; hops?: Hop[]; impactBps?: bigint } | { revert: Hex };
   decimalsFor?: Record<string, number | 'revert'>;   // decimals() per lowercase address
   arbsysEmpty?: boolean;                             // ArbSys (0x64) answers no data, as on a chain without it
   noBlockHash?: boolean;                             // the node refuses an EIP-1898 { blockHash } block parameter
   headerSkew?: bigint;                               // eth_getBlockByNumber reports a number this far off the block its hash names
-  headerOther?: bigint;                              // eth_getBlockByNumber answers the whole header (number and hash) of a block this far off the one asked
+  headerOther?: bigint;
+  timestampOf?: (height: bigint) => bigint | null;     // the header's timestamp (default 0x65000000); null → the header has no timestamp field                              // eth_getBlockByNumber answers the whole header (number and hash) of a block this far off the one asked
   afterMulticall?: (k: number, at: MockBlock, chain: MockChain) => void;   // runs after the k-th Multicall3 call (1-based)
 }
 interface MockBlock { height: bigint; gen: number }
@@ -330,6 +335,7 @@ function mockProvider(o: MockOpts = {}) {
   const gens = new Map<bigint, number>();
   const hashOf = (h: bigint, g = gens.get(h) ?? 0): Hex => `0x${h.toString(16).padStart(48, '0')}${g.toString(16).padStart(16, '0')}`;
   const chain: MockChain = { reorg: (h) => { gens.set(h, (gens.get(h) ?? 0) + 1); }, advance: (n) => { head += n; }, head: () => head, hashOf: (h) => hashOf(h) };
+  const header = (h: bigint) => ({ number: `0x${(h + (o.headerSkew ?? 0n)).toString(16)}`, hash: hashOf(h), parentHash: hashOf(h - 1n), ...((t) => (t === null ? {} : { timestamp: `0x${t.toString(16)}` }))(o.timestampOf ? o.timestampOf(h) : 0x65000000n) });
   let multicalls = 0;
   let cur: MockBlock = { height: head, gen: 0 };
   const provider = {
@@ -349,7 +355,13 @@ function mockProvider(o: MockOpts = {}) {
         calls.push({ method, block: p[0] });
         const tag = p[0] as string;
         const h = (tag.startsWith('0x') ? BigInt(tag) : (head += 1n)) + (o.headerOther ?? 0n);
-        return { number: `0x${(h + (o.headerSkew ?? 0n)).toString(16)}`, hash: hashOf(h), parentHash: hashOf(h - 1n), timestamp: '0x65000000' };
+        return header(h);
+      }
+      if (method === 'eth_getBlockByHash') {
+        // EIP-1898 lookup by hash: a hash a reorg replaced is unknown to the node (null)
+        calls.push({ method, block: p[0] });
+        const bh = p[0] as string, h = BigInt(`0x${bh.slice(2, 50)}`);
+        return bh === hashOf(h) ? header(h + (o.headerOther ?? 0n)) : null;
       }
       if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
       const { to, data, from: caller } = p[0] as { to: string; data: Hex; from?: string };
@@ -408,7 +420,7 @@ function mockProvider(o: MockOpts = {}) {
             if (o.usd) {
               const u = o.usd(tIn, tOut, amt, cur);
               if ('revert' in u) throw Object.assign(new Error('execution reverted'), { code: 3, data: u.revert });
-              const r = { ...mkRoute(tIn, tOut, amt, u.netOut), ...(u.hops ? { hops: u.hops } : {}) };
+              const r = { ...mkRoute(tIn, tOut, amt, u.netOut), ...(u.hops ? { hops: u.hops } : {}), ...(u.impactBps !== undefined ? { expectedImpactBps: u.impactBps } : {}) };
               return encodeFunctionResult({ abi: QUOTER_ABI, functionName: d.functionName, result: [{ ...mkPreview(r, umo ?? 0n), netOut: u.netOut }, r, false] as never });
             }
             const route = mkRoute(tIn, tOut, amt, outFor(amt));
@@ -1269,6 +1281,35 @@ console.log('client · usdValue');
     await throwsCode('usdValue: the node answers the header of another block for a pinned blockNumber → rpc_error',
       () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0x500n }), 'rpc_error');
   }
+  // pin by block hash (EIP-1898) — mutants: blockHash not returned; the request's blockHash ignored
+  // (the block read by number); a header of another hash accepted; a malformed hash sent to the node
+  {
+    const m = mockProvider({ decimalsFor: usdc6, usd: reorgTable });
+    const blaze = new BlazePhoenix({ rpc: { base: m.provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    const aggs = () => m.calls.filter((c) => c.fn === 'multicall.aggregate3');
+    const headers = () => m.calls.filter((c) => c.method.startsWith('eth_getBlockBy'));
+    const v = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A });
+    eq('usdValue: blockHash is the hash that pinned every read', [v.blockHash, aggs().every((c) => (c.block as { blockHash: string }).blockHash === v.blockHash)], [m.chain.hashOf(v.blockNumber!), true]);
+    const before = aggs().length;
+    const w = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: v.blockHash! });
+    eq('usdValue: a blockHash pin reads that block by its hash: same number, hash and value',
+      [w.blockNumber, w.blockHash, w.usdValue, headers().at(-1), aggs().slice(before).every((c) => (c.block as { blockHash: string }).blockHash === v.blockHash)],
+      [v.blockNumber, v.blockHash, v.usdValue, { method: 'eth_getBlockByHash', block: v.blockHash }, true]);
+    const lower = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockNumber: 0xabcn });
+    const upper = await blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: `0x${lower.blockHash!.slice(2).toUpperCase()}` });
+    eq('usdValue: a blockHash in upper-case hex names the same block', [/[a-f]/.test(lower.blockHash!), upper.blockNumber, upper.blockHash], [true, 0xabcn, lower.blockHash]);
+    m.chain.reorg(v.blockNumber!);
+    const n = aggs().length;
+    await throwsCode('usdValue: a blockHash a reorg replaced → rpc_error, never the new block at that height',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: v.blockHash! }), 'rpc_error');
+    eq('usdValue: a blockHash a reorg replaced reads nothing', aggs().length, n);
+    await throwsCode('usdValue: a blockHash that is not 32 bytes of hex → bad_request',
+      () => blaze.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: '0x1234' as Hex }), 'bad_request');
+    const other = mockProvider({ decimalsFor: usdc6, usd: reorgTable, headerOther: 1n });
+    const b2 = new BlazePhoenix({ rpc: { base: other.provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
+    await throwsCode('usdValue: the node answers the header of another hash for a pinned blockHash → rpc_error',
+      () => b2.usdValue({ chain: 'base', token: TKN, amountIn: A, blockHash: other.chain.hashOf(0x500n) }), 'rpc_error');
+  }
   // Property, blind seed: N blocks, random reorgs (at the height being read or just below), random
   // prices, reverts and routes per block, on Base and on Arbitrum (ArbSys). A measured result comes
   // from ONE block (every leg is that block's answer, every via was discovered on it), is never above
@@ -1281,22 +1322,23 @@ console.log('client · usdValue');
     let st = seed;
     const rnd = (n: number) => { st = (st * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n); return Number((st >> 33n) % BigInt(n)); };
     const h = (...xs: unknown[]) => BigInt(`0x${createHash('sha256').update(xs.map(String).join('|')).digest('hex').slice(0, 12)}`);
-    const routeOf = (at: MockBlock) => [1, 2, 3, 4].filter((i) => h(seed, 'route', at.height, at.gen, i) % 2n === 0n).map(X);
+    let run = 0;   // every answer hashes the run too: on the seed alone all runs saw the same chain
+    const routeOf = (at: MockBlock) => [1, 2, 3, 4].filter((i) => h(seed, run, 'route', at.height, at.gen, i) % 2n === 0n).map(X);
     const RUNS = 150;
     let bad = 0, measured = 0, notMeasured = 0, restarts = 0;
     const firstBad: string[] = [];
-    for (let run = 0; run < RUNS; run++) {
+    for (run = 0; run < RUNS; run++) {
       const arb = rnd(2) === 1;
       const chainId = arb ? 42161 : 8453;
       const dollar = CHAINS[chainId].usdc;
       const pReorg = rnd(4);   // a reorg after each aggregate with probability 0, 1/4, 2/4 or 3/4
       const served: MockBlock[] = [];
       const answer = (a: Address, b: Address, amt: bigint, at: MockBlock): Ans => {
-        if (h(seed, 'rev', at.height, at.gen, a, b) % 6n === 0n) return { revert: NO_ROUTE };
-        const netOut = h(seed, 'out', at.height, at.gen, a, b, amt) % 10n ** 9n + 1n;
+        if (h(seed, run, 'rev', at.height, at.gen, a, b) % 6n === 0n) return { revert: NO_ROUTE };
+        const netOut = h(seed, run, 'out', at.height, at.gen, a, b, amt) % 10n ** 9n + 1n;
         if (key(a, b) !== key(TKN, dollar)) return { netOut };
         const path = [TKN, ...routeOf(at), dollar];
-        return { netOut, hops: path.slice(0, -1).map((x, i) => hop(x, path[i + 1]!, i === 0 ? amt : 10n ** 18n + h(seed, 'ref', at.height, at.gen, x) % 10n ** 18n)) };
+        return { netOut, hops: path.slice(0, -1).map((x, i) => hop(x, path[i + 1]!, i === 0 ? amt : 10n ** 18n + h(seed, run, 'ref', at.height, at.gen, x) % 10n ** 18n)) };
       };
       const { provider, calls } = mockProvider({
         chainId, ...(arb ? { quoter: '0xfB18EF6f62A0278A273Af4b7A46b454F9E482dc2' as Address } : {}), decimalsFor: { [dollar.toLowerCase()]: 6 }, usd: answer,
@@ -1307,7 +1349,7 @@ console.log('client · usdValue');
         },
       });
       const blaze = new BlazePhoenix({ rpc: { [arb ? 'arbitrum' : 'base']: provider }, registry: { mode: 'embedded' }, cacheTtlMs: 0 });
-      const amountIn = 1n + h(seed, 'amt', run) % 10n ** 24n;
+      const amountIn = 1n + h(seed, run, 'amt', run) % 10n ** 24n;
       let why = '';
       try {
         const v = await blaze.usdValue({ chain: arb ? 'arbitrum' : 'base', token: TKN, amountIn });
@@ -1589,6 +1631,487 @@ for (const leak of LEAKS) {
   const names = new Set((BLAZE_ERRORS_ABI as readonly { type: string; name?: string }[]).filter((x) => x.type === 'error').map((x) => x.name));
   for (const n of ['RouterE', 'QuoterE', 'SolverE', 'HubE', 'GateE', 'AdapterE', 'QuoteDeltas', 'GateQuoteCall', 'InputProbe']) {
     check(`BLAZE_ERRORS_ABI decodes ${n}`, names.has(n));
+  }
+}
+
+console.log('crossChain · aggregateQuotedPrices (pure)');
+{
+  // Every test names the mutant that turns it red (see the PR for the run).
+  const E = USD_E18;
+  const pt = (chainId: number, price: bigint | null, ts: bigint | null = 1000n, depth?: QuotedDepthPoint): QuotedPricePoint =>
+    ({ chainId, priceUsd: price, blockTimestamp: ts, ...(price === null ? { reason: 'no via measured' } : {}), ...(depth ? { depth } : {}) });
+  const dp = (p2: bigint | null, a1 = 1n, a2 = 2n, dec = 0): QuotedDepthPoint => ({ amountIn: a1, depthAmountIn: a2, tokenDecimals: dec, depthPriceUsd: p2 });
+  const nums = (a: QuotedPriceAggregate) => [a.status, a.medianPriceUsd, a.minPriceUsd, a.maxPriceUsd, a.spreadBps, a.skewSeconds];
+
+  // 1 chain — mutant X1: spread/skew reported with one chain (0n instead of null)
+  eq('xchain: one chain → median = its price, min = max, no spread or skew (null, not 0)',
+    nums(aggregateQuotedPrices([pt(8453, 7n * E)])), ['measured', 7n * E, 7n * E, 7n * E, null, null]);
+  // 2 chains, odd sum — mutant X2: median rounds up ((a + b + 1) / 2); X3: upper middle only
+  eq('xchain: two chains → median = floor((a + b) / 2), integer division rounds down',
+    aggregateQuotedPrices([pt(8453, 3n), pt(10, 4n)]).medianPriceUsd, 3n);
+  eq('xchain: two chains 100 and 200 → median 150', aggregateQuotedPrices([pt(8453, 200n), pt(10, 100n)]).medianPriceUsd, 150n);
+  // 3 chains, unsorted input — mutant X4: no sort (takes the input's middle)
+  eq('xchain: three chains, unsorted → the middle price', nums(aggregateQuotedPrices([pt(8453, 5n), pt(10, 1n), pt(42161, 3n)])),
+    ['measured', 3n, 1n, 5n, 40000n, 0n]);
+  eq('xchain: four chains → mean of the two middle', aggregateQuotedPrices([pt(1, 9n), pt(8453, 1n), pt(10, 4n), pt(42161, 7n)]).medianPriceUsd, 5n);
+  // one not measured — mutant X5: a null price counts as 0 (min 0, median moves)
+  {
+    const a = aggregateQuotedPrices([pt(8453, 10n), pt(10, null), pt(42161, 20n)]);
+    eq('xchain: a chain not measured is excluded with its reason; never a 0 in min or median',
+      [nums(a), a.included.map((c) => c.chainId), a.excluded], [['measured', 15n, 10n, 20n, 10000n, 0n], [8453, 42161], [{ chainId: 10, reason: 'no via measured' }]]);
+    const t = aggregateQuotedPrices([pt(8453, 10n), pt(10, 11n, null)]);
+    eq('xchain: a price without a block timestamp is excluded (its age cannot be measured)', [t.included.length, t.excluded[0]?.chainId], [1, 10]);
+  }
+  // none measured — mutant X6: a 0 median when nothing measured
+  eq('xchain: no chain measured → not_measured, every number null', nums(aggregateQuotedPrices([pt(8453, null), pt(10, null)])),
+    ['not_measured', null, null, null, null, null]);
+  eq('xchain: no chain given → not_measured', aggregateQuotedPrices([]).status, 'not_measured');
+  // spread — mutant X7: divided by max ((max − min)·10000/max = 291)
+  eq('xchain: spreadBps = floor((max − min)·10000 / min)', aggregateQuotedPrices([pt(8453, 100n), pt(10, 103n)]).spreadBps, 300n);
+  eq('xchain: spreadBps rounds down (1/3 bps → 0... 3333)', aggregateQuotedPrices([pt(8453, 3n), pt(10, 4n)]).spreadBps, 3333n);
+  // skew — mutant X8: `>` at the edge (newest − maxSkew excluded); X9: reference = oldest, not newest
+  {
+    const a = aggregateQuotedPrices([pt(8453, 10n, 1000n), pt(10, 11n, 950n), pt(42161, 12n, 949n)], { maxSkewSeconds: 50 });
+    eq('xchain: maxSkewSeconds keeps a block exactly maxSkew older, excludes one 1 s older, names its age',
+      [a.included.map((c) => c.chainId), a.excluded.map((c) => c.chainId), a.excluded[0]?.reason.includes('51 s older'), a.skewSeconds, a.newestBlockTimestamp],
+      [[8453, 10], [42161], true, 50n, 1000n]);
+    eq('xchain: without maxSkewSeconds no chain is excluded for age; skewSeconds = newest − oldest',
+      [aggregateQuotedPrices([pt(8453, 10n, 1000n), pt(10, 11n, 1n)]).included.length, aggregateQuotedPrices([pt(8453, 10n, 1000n), pt(10, 11n, 1n)]).skewSeconds], [2, 999n]);
+    eq('xchain: maxSkewSeconds 0 keeps only the newest block(s)', aggregateQuotedPrices([pt(8453, 10n, 5n), pt(10, 11n, 5n), pt(1, 12n, 4n)], { maxSkewSeconds: 0n }).included.length, 2);
+  }
+  // depth weight — X10: weight = impact (p1 − p2) not depth; X11: mean of p2 not p1; X12: 10^decimals dropped; X13: p₂ factor dropped
+  {
+    // A: p1 100, p2 50 → D = 1·100·50/50 = 100; B: p1 200, p2 100 → D = 200; (100·100 + 200·200)/300 = 166.6 → 166
+    const a = aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(50n)), pt(10, 200n, 1000n, dp(100n))]);
+    eq('xchain: depth-weighted = Σ D·p / Σ D with D = Δa·p1·p2/(p1 − p2), rounded down once',
+      [a.depthWeightedPriceUsd, a.included.map((c) => c.depthUsd), a.medianPriceUsd], [166n, [100n, 200n], 150n]);
+    const b = aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(50n)), pt(10, 200n, 1000n, dp(100n, 10n ** 6n, 2n * 10n ** 6n, 6))]);
+    eq('xchain: the same depth in 6-decimal base units weighs the same (10^decimals)', b.depthWeightedPriceUsd, 166n);
+    // less impact on B (p2 150 → D = 1·200·150/50 = 600) → more weight on B
+    const c = aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(50n)), pt(10, 200n, 1000n, dp(150n))]);
+    eq('xchain: less impact → more weight (B 600 vs A 100 → 185)', [c.depthWeightedPriceUsd, c.included.map((x) => x.depthUsd)], [185n, [100n, 600n]]);
+    // the second size alone (A: Δa 3 → D 300 vs B 200) moves the weight: 3·100·50/50 = 300 → (300·100 + 200·200)/500 = 140
+    eq('xchain: depth scales with the size step Δa', aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(50n, 1n, 4n)), pt(10, 200n, 1000n, dp(100n))]).depthWeightedPriceUsd, 140n);
+  }
+  // unresolved depth — mutant X14: a chain with p2 ≥ p1 dropped from the weights (a number instead of null)
+  {
+    const a = aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(100n)), pt(10, 200n, 1000n, dp(100n))]);
+    eq('xchain: p2 ≥ p1 on a chain → depth not resolved: depth-weighted null with the chain named, median stands',
+      [a.depthWeightedPriceUsd, a.depthWeightedReason?.startsWith('chain 8453: the price at depthAmountIn is not below'), a.medianPriceUsd, a.included.map((c) => c.depthUsd)],
+      [null, true, 150n, [null, null]]);
+    const m = aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(null)), pt(10, 200n, 1000n, dp(100n))]);
+    eq('xchain: depth not measured on one chain → depth-weighted null', [m.depthWeightedPriceUsd, m.depthWeightedReason?.includes('not measured')], [null, true]);
+    eq('xchain: no second size → depth-weighted null', aggregateQuotedPrices([pt(8453, 100n)]).depthWeightedPriceUsd, null);
+    // the excluded chain's depth is not needed
+    eq('xchain: an excluded chain without depth does not void the depth-weighted price',
+      aggregateQuotedPrices([pt(8453, 100n, 1000n, dp(50n)), pt(10, 200n, 1n)], { maxSkewSeconds: 10 }).depthWeightedPriceUsd, 100n);
+  }
+  // malformed input — mutant X15: duplicate chain accepted
+  await throwsCode('xchain: a duplicate chain → bad_request', () => aggregateQuotedPrices([pt(8453, 1n), pt(8453, 2n)]), 'bad_request');
+  await throwsCode('xchain: a price of 0 → bad_request (missing is null)', () => aggregateQuotedPrices([pt(8453, 0n)]), 'bad_request');
+  await throwsCode('xchain: depthAmountIn = amountIn → bad_request', () => aggregateQuotedPrices([pt(8453, 9n, 1n, dp(5n, 2n, 2n))]), 'bad_request');
+  await throwsCode('xchain: negative maxSkewSeconds → bad_request', () => aggregateQuotedPrices([pt(8453, 9n)], { maxSkewSeconds: -1 }), 'bad_request');
+  // mutant X4: excluded listed in scan order (no-price first, then age) instead of input order
+  eq('xchain: excluded chains are listed in input order, whatever the reason',
+    aggregateQuotedPrices([pt(10, 5n, 900n), pt(1, null), pt(8453, 7n, 1000n)], { maxSkewSeconds: 0 }).excluded.map((x) => x.chainId), [10, 1]);
+  // mutant G10: a negative block timestamp accepted
+  await throwsCode('xchain: a negative blockTimestamp → bad_request', () => aggregateQuotedPrices([pt(8453, 9n, -1n)]), 'bad_request');
+  // mutant: wholeToBase ignores decimals / accepts extra fraction digits / drops the integer part
+  eq('xchain: wholeToBase converts whole tokens with the token\'s decimals; extra fraction digits → null',
+    [wholeToBase('1', 6), wholeToBase('1', 18), wholeToBase('0.5', 18), wholeToBase('1.50', 1), wholeToBase('12.000', 0), wholeToBase('0.001', 2), wholeToBase('0.0000001', 6)],
+    [10n ** 6n, 10n ** 18n, 5n * 10n ** 17n, 15n, 12n, null, null]);
+  // mutant: a kind read as measured when the Quoter uses its constant default (or the reverse)
+  eq('xchain: impactKindMeasured follows the Quoter\'s kind table (reserves or concentrated liquidity → measured)',
+    [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 1.5].map(impactKindMeasured),
+    [false, true, true, false, false, false, true, true, false, false, false, false, false]);
+  // unit price — mutant X16: rounds up
+  eq('xchain: quotedUnitPriceUsd: 2 USDC (6 dec) for 1 token (18 dec) → 2e18', quotedUnitPriceUsd(2_000_000n, 10n ** 18n, 18, 6), 2n * E);
+  eq('xchain: quotedUnitPriceUsd rounds down (1 base unit for 3 tokens)', quotedUnitPriceUsd(1n, 3n, 0, 6), 333_333_333_333n);
+  eq('xchain: quotedUnitPriceUsd below 1e-18 USD → null, never 0', quotedUnitPriceUsd(1n, 10n ** 38n, 0, 6), null);
+  eq('xchain: formatQuotedUsd: display only, null → "not measured"', [formatQuotedUsd(1_500_000_000_000_000_000n), formatQuotedUsd(null)], ['1.5', 'not measured']);
+
+  // Property, blind seed. Coverage by construction, not by luck: run k takes its SHAPE from k
+  // (chain count 1..5, how many not measured, whether one block is out of maxSkew, whether
+  // one depth is unresolved), cycling through every combination; the seed draws only values.
+  // Oracles are independent of the code: the median by counting, the weighted mean checked by
+  // bounds, order invariance, unit invariance and monotonicity in depth.
+  // Mutants: X4 (no sort), X2 (rounds up), X5 (null as 0), X8/X9 (skew edge/reference), X10 (weight = impact), X12 (decimals).
+  {
+    const seed = process.env.XCHAIN_FUZZ_SEED ? BigInt(process.env.XCHAIN_FUZZ_SEED) : BigInt(`0x${randomBytes(8).toString('hex')}`);
+    console.log(`  · crossChain property seed ${seed} (XCHAIN_FUZZ_SEED=${seed} reproduces it)`);
+    let st = seed;
+    const rnd = (n: bigint) => { st = (st * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n); return (st >> 11n) % n; };
+    const IDS = [1, 10, 8453, 42161, 4663];
+    const SHAPES: { n: number; dead: number; stale: boolean; flat: boolean }[] = [];
+    for (let n = 1; n <= 5; n++) for (let dead = 0; dead <= Math.min(2, n - 1); dead++) for (const stale of [false, true]) for (const flat of [false, true]) {
+      if (stale && n - dead < 2) continue;  // one live chain is the newest: never stale
+      SHAPES.push({ n, dead, stale, flat });
+    }
+    const RUNS = SHAPES.length * 4;
+    let bad = 0;
+    const firstBad: string[] = [];
+    const seen = new Set<string>();
+    for (let run = 0; run < RUNS; run++) {
+      const s = SHAPES[run % SHAPES.length]!;
+      const now = 1_700_000_000n + rnd(10n ** 6n);
+      const maxSkew = rnd(600n);
+      const pts: QuotedPricePoint[] = IDS.slice(0, s.n).map((id, i) => {
+        if (i >= s.n - s.dead) return pt(id, null, null);
+        const p1 = 1n + rnd(10n ** 30n);
+        const dec = Number(rnd(19n));
+        const a1 = 1n + rnd(10n ** 20n);
+        const a2 = a1 + 1n + rnd(10n ** 20n);
+        const flat = s.flat && i === 0;
+        const p2 = flat ? p1 + rnd(3n) : p1 > 1n ? 1n + rnd(p1 - 1n) : null;
+        const ts = i === 0 ? now : s.stale && i === 1 ? now - maxSkew - 1n - rnd(1000n) : now - rnd(maxSkew + 1n);
+        return pt(id, p1, ts, { amountIn: a1, depthAmountIn: a2, tokenDecimals: dec, depthPriceUsd: p2 });
+      });
+      const live = pts.filter((p) => p.priceUsd !== null && p.blockTimestamp! >= now - maxSkew);
+      const a = aggregateQuotedPrices(pts, { maxSkewSeconds: maxSkew });
+      let why = '';
+      // membership: every chain is either included or excluded, with a reason
+      if (a.included.length + a.excluded.length !== pts.length || a.excluded.some((x) => !x.reason)) why ||= 'membership';
+      if (JSON.stringify(a.included.map((c) => c.chainId)) !== JSON.stringify(live.map((p) => p.chainId))) why ||= 'included set';
+      const ps = live.map((p) => p.priceUsd!);
+      if (ps.length === 0) {
+        if (a.status !== 'not_measured' || a.medianPriceUsd !== null || a.depthWeightedPriceUsd !== null) why ||= 'number without a measurement';
+      } else {
+        const m = a.medianPriceUsd!;
+        const n = ps.length;
+        const lt = (x: bigint) => ps.filter((p) => p < x).length, gt = (x: bigint) => ps.filter((p) => p > x).length;
+        if (n % 2 === 1) { if (!ps.includes(m) || lt(m) > (n - 1) / 2 || gt(m) > (n - 1) / 2) why ||= `median ${m} of ${ps}`; }
+        else {
+          const lo = ps.find((x) => lt(x) <= n / 2 - 1 && gt(x) <= n / 2 && ps.filter((p) => p <= x).length >= n / 2)!;
+          const hi = ps.find((x) => gt(x) <= n / 2 - 1 && lt(x) <= n / 2 && ps.filter((p) => p >= x).length >= n / 2)!;
+          if (2n * m !== lo + hi && 2n * m + 1n !== lo + hi) why ||= `even median ${m} of ${ps}`;
+        }
+        const mn = ps.reduce((x, y) => (y < x ? y : x)), mx = ps.reduce((x, y) => (y > x ? y : x));
+        if (a.minPriceUsd !== mn || a.maxPriceUsd !== mx || m < mn || m > mx) why ||= 'bounds';
+        if (n >= 2 ? a.spreadBps !== ((mx - mn) * 10_000n) / mn : a.spreadBps !== null) why ||= 'spread';
+        const resolved = live.every((p) => p.depth!.depthPriceUsd !== null && p.depth!.depthPriceUsd < p.priceUsd!);
+        const w = a.depthWeightedPriceUsd;
+        if (resolved !== (w !== null)) why ||= `depth resolved ${resolved} but weighted ${w}`;
+        if (w !== null) {
+          if (w < mn || w > mx) why ||= `weighted ${w} outside [${mn}, ${mx}]`;
+          // order of the chains does not matter
+          if (aggregateQuotedPrices([...pts].reverse(), { maxSkewSeconds: maxSkew }).depthWeightedPriceUsd !== w) why ||= 'order';
+          // the same sizes in 10^3 finer base units (decimals + 3) give the same number
+          const finer = pts.map((p) => (p.depth ? { ...p, depth: { ...p.depth, amountIn: p.depth.amountIn * 1000n, depthAmountIn: p.depth.depthAmountIn * 1000n, tokenDecimals: p.depth.tokenDecimals + 3 } } : p));
+          if (aggregateQuotedPrices(finer, { maxSkewSeconds: maxSkew }).depthWeightedPriceUsd !== w) why ||= 'units';
+          // less impact on the highest-priced chain (p2 halfway to p1) never lowers the weighted price
+          const top = live.find((p) => p.priceUsd === mx)!;
+          const d = top.depth!;
+          const up = pts.map((p) => (p === top ? { ...p, depth: { ...d, depthPriceUsd: d.depthPriceUsd! + (p.priceUsd! - d.depthPriceUsd!) / 2n } } : p));
+          const w2 = aggregateQuotedPrices(up, { maxSkewSeconds: maxSkew }).depthWeightedPriceUsd;
+          if (w2 === null || w2 < w) why ||= `less impact on the top chain lowered the weighted price ${w} → ${w2}`;
+        }
+        seen.add(`${n % 2 === 0 ? 'even' : 'odd'}|${s.dead > 0 ? 'dead' : ''}|${a.excluded.some((x) => x.reason.includes('older')) ? 'stale' : ''}|${w === null ? 'unresolved' : 'weighted'}`);
+      }
+      if (why) { bad++; if (firstBad.length < 3) firstBad.push(`run ${run} ${JSON.stringify(s)}: ${why}`); }
+    }
+    check(`crossChain property: ${RUNS} runs, median/bounds/spread/membership/depth weight hold`, bad === 0, firstBad.join(' | '));
+    // coverage holds for every seed: the shapes are enumerated, not drawn
+    const need = ['odd||stale|weighted', 'even|dead|stale|unresolved', 'odd|dead||weighted', 'even|||weighted', 'odd|||unresolved'];
+    check('crossChain property covers odd/even, not measured, stale and unresolved depth (by construction)', need.every((k) => seen.has(k)), `missing ${need.filter((k) => !seen.has(k))}`);
+  }
+}
+
+console.log('crossChain · crossChainPrice / crossChainAverage (RPC)');
+{
+  const TKN = getAddress('0x00000000000000000000000000000000000000aa');
+  const NO_ROUTE = encodeErrorResult({ abi: BLAZE_ERRORS_ABI, errorName: 'SolverE', args: [5] });
+  const DEP = EMBEDDED_DEPLOYMENTS.versions.find((v) => v.version === '1.0.0')!.chains;
+  // A constant-product curve per chain: x token reserve (18 dec), y dollar reserve (6 dec).
+  const chainOf = (chainId: number, curve: { x: bigint; y: bigint } | null, ts: bigint) => {
+    const dollar = CHAINS[chainId as keyof typeof CHAINS].usdc;
+    return mockProvider({
+      chainId, quoter: DEP[chainId as keyof typeof DEP]!.quoter, decimalsFor: { [dollar.toLowerCase()]: 6 }, timestampOf: () => ts,
+      usd: (a, b, amt) => (curve && a.toLowerCase() === TKN.toLowerCase() && b.toLowerCase() === dollar.toLowerCase()
+        ? { netOut: (curve.y * amt) / (curve.x + amt) } : { revert: NO_ROUTE }),
+    });
+  };
+  const opts = { registry: { mode: 'embedded' as const }, cacheTtlMs: 0 };
+  const T0 = 1_700_000_000n;
+  // base: 1000 tokens / 1,000,000 USD; optimism: 2000 tokens / 4,000,000 USD; ethereum: no route
+  const base = chainOf(8453, { x: 10n ** 21n, y: 10n ** 12n }, T0);
+  const op = chainOf(10, { x: 2n * 10n ** 21n, y: 4n * 10n ** 12n }, T0 - 7n);
+  const eth = chainOf(1, null, T0);
+  const client = new BlazePhoenix({ rpc: { base: base.provider, optimism: op.provider, ethereum: eth.provider }, ...opts });
+  const A1 = 10n ** 18n, A2 = 10n ** 19n;
+  const entries = [{ chain: 'base', token: TKN, amountIn: A1 }, { chain: 'optimism', token: TKN, amountIn: A1 }, { chain: 'ethereum', token: TKN, amountIn: A1 }];
+
+  // mutant Y1: blockTimestamp dropped from usdValue (null)
+  eq('usdValue: blockTimestamp is the pinned header\'s timestamp', (await client.usdValue({ chain: 'optimism', token: TKN, amountIn: A1 })).blockTimestamp, T0 - 7n);
+  {
+    const r = await crossChainPrice({ client, chains: entries });
+    const p = (out: bigint) => out * 10n ** 12n;   // usd(6 dec) per 1 token(18 dec) → ×1e12 at E18
+    const bOut = (10n ** 12n * A1) / (10n ** 21n + A1), oOut = (4n * 10n ** 12n * A1) / (2n * 10n ** 21n + A1);
+    // mutant Y2: a chain's RPC failure rejects the whole call; Y3: price not per whole token (no decimals)
+    eq('crossChainPrice: per chain price per whole token (E18), block, timestamp; a chain with no route is not_measured with its reason',
+      [r.chains.map((c) => [c.chainId, c.status, c.priceUsd, c.blockTimestamp, c.blockNumber !== null]), r.chains[2]!.reason?.startsWith('no via measured'), r.status],
+      [[[8453, 'measured', p(bOut), T0, true], [10, 'measured', p(oOut), T0 - 7n, true], [1, 'not_measured', null, T0, true]], true, 'measured']);
+    eq('crossChainPrice: min, max, spreadBps over the measured chains; skewSeconds from the block timestamps',
+      [r.minPriceUsd, r.maxPriceUsd, r.spreadBps, r.skewSeconds], [p(bOut), p(oOut), ((p(oOut) - p(bOut)) * 10_000n) / p(bOut), 7n]);
+    check('crossChainPrice: the wording is quoted, never executed or volume', /^Quoted prices/.test(r.basis) && !/trade/i.test(r.basis) && /Quoted, not executed; no volume is read\.$/.test(r.basis));
+  }
+  {
+    // a node that is down: that chain only is not_measured, the URL never in the reason — mutant Y2
+    const down = { request: async () => { throw new Error('fetch failed https://user:secret@rpc.example.org/key123'); } };
+    const r = await crossChainPrice({ client, chains: [entries[0]!, { chain: 42161, token: TKN, amountIn: A1, rpc: down }] });
+    eq('crossChainPrice: a chain whose RPC fails is not_measured with a reason; the others stand',
+      [r.chains.map((c) => c.status), r.status, /secret|key123/.test(r.chains[1]!.reason ?? '')], [['measured', 'not_measured'], 'measured', false]);
+  }
+  // caller errors throw before any read — mutant Y4: any symbol accepted (matched by name)
+  {
+    const before = base.calls.length;
+    await throwsCode('crossChainPrice: a symbol that is not built-in → bad_request (tokens are never matched by name)',
+      () => crossChainPrice({ client, chains: [{ chain: 'base', token: 'PEPE', amountIn: A1 }] }), 'bad_request');
+    await throwsCode('crossChainPrice: the same chain twice → bad_request', () => crossChainPrice({ client, chains: [entries[0]!, { ...entries[0]!, chain: 8453 }] }), 'bad_request');
+    await throwsCode('crossChainPrice: no client and no rpc → bad_request', () => crossChainPrice({ chains: [entries[0]!] }), 'bad_request');
+    await throwsCode('crossChainPrice: amountIn 0 → bad_request', () => crossChainPrice({ client, chains: [{ ...entries[0]!, amountIn: 0n }] }), 'bad_request');
+    await throwsCode('crossChainPrice: USDC on Robinhood Chain → bad_request (its dollar token is USDG)', () => crossChainPrice({ client, chains: [{ chain: 'robinhood', token: 'USDC', amountIn: 1n, rpc: base.provider }] }), 'bad_request');
+    eq('crossChainPrice: a malformed request reads nothing', base.calls.length, before);
+  }
+  {
+    const r = await crossChainAverage({ client, chains: entries.map((e) => ({ ...e, depthAmountIn: A2 })) });
+    // mutant Y5: the second size not pinned to the first size's block (read at latest)
+    // mutant H2: pinned by the first block's number, not its hash
+    const headers = op.calls.filter((c) => c.method.startsWith('eth_getBlockBy')).slice(-2).map((c) => [c.method, c.block]);
+    eq('crossChainAverage: the second size is quoted in the block of the first, named by its hash', [headers[0], headers[1], r.chains[1]!.blockHash === op.chain.hashOf(r.chains[1]!.blockNumber!)],
+      [['eth_getBlockByNumber', 'latest'], ['eth_getBlockByHash', r.chains[1]!.blockHash], true]);
+    const points = r.chains.map((c) => ({
+      chainId: c.chainId, priceUsd: c.priceUsd, blockTimestamp: c.status === 'measured' ? c.blockTimestamp : null,
+      ...(c.reason ? { reason: c.reason } : {}),
+      depth: { amountIn: A1, depthAmountIn: A2, tokenDecimals: 18, depthPriceUsd: c.depth?.priceUsd ?? null },
+    }));
+    const pure = aggregateQuotedPrices(points);
+    eq('crossChainAverage: the numbers are aggregateQuotedPrices of its per-chain readings (port parity)',
+      [r.medianPriceUsd, r.depthWeightedPriceUsd, r.spreadBps, r.skewSeconds, r.included.map((c) => c.chainId), r.excluded.map((c) => c.chainId)],
+      [pure.medianPriceUsd, pure.depthWeightedPriceUsd, pure.spreadBps, pure.skewSeconds, [8453, 10], [1]]);
+    // depth recovers the dollar reserve of a constant-product curve (1e6 and 4e6 USD) to < 1e-6: the error left is
+    // netOut rounded down to one dollar base unit over p1 − p2 (~1e7 units here) — mutants X12/X13
+    const D = r.included.map((c) => c.depthUsd!);
+    const near = (got: bigint, want: bigint) => (got > want ? got - want : want - got) * 10n ** 6n < want;
+    check('crossChainAverage: depthUsd recovers the constant-product dollar reserve', near(D[0]!, 10n ** 24n) && near(D[1]!, 4n * 10n ** 24n), `${D}`);
+    eq('crossChainAverage: depth-weighted sits 4:1 toward the deeper chain', r.depthWeightedPriceUsd! > r.medianPriceUsd!, true);
+    // mutant X8/X9 through the client: optimism 7 s older than base, maxSkewSeconds 6 excludes it
+    const s = await crossChainAverage({ client, maxSkewSeconds: 6, chains: entries.slice(0, 2).map((e) => ({ ...e, depthAmountIn: A2 })) });
+    eq('crossChainAverage: maxSkewSeconds excludes the older chain and says why',
+      [s.included.map((c) => c.chainId), s.excluded.map((c) => [c.chainId, c.reason.includes('7 s older')]), s.medianPriceUsd === r.chains[0]!.priceUsd], [[8453], [[10, true]], true]);
+    const none = await crossChainAverage({ client, chains: [{ ...entries[2]!, depthAmountIn: A2 }] });
+    eq('crossChainAverage: no chain measured → not_measured, no number', [none.status, none.medianPriceUsd, none.depthWeightedPriceUsd], ['not_measured', null, null]);
+    await throwsCode('crossChainAverage: depthAmountIn ≤ amountIn → bad_request', () => crossChainAverage({ client, chains: [{ ...entries[0]!, depthAmountIn: A1 }] }), 'bad_request');
+  }
+  {
+    // remoteVersions: a registry refresh between the two sizes may move the Quoter under the same
+    // version string; the second size must come from the Quoter of the first — mutant Y6
+    const q0 = (await client.usdValue({ chain: 'base', token: TKN, amountIn: A1 })).quoter;
+    eq('usdValue: quoter is the address every previewPlan went to', q0, DEP[8453]!.quoter);
+    let n = 0;
+    const moved = Object.create(client) as BlazePhoenix;
+    moved.usdValue = async (req) => {
+      const v = await client.usdValue(req);
+      return n++ === 0 ? v : { ...v, quoter: getAddress('0x00000000000000000000000000000000000000a4') };
+    };
+    const r = await crossChainAverage({ client: moved, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    const d = r.chains[0]!.depth!;
+    eq('crossChainAverage: a depth quote from another Quoter than the first is not measured, and says why',
+      [r.chains[0]!.status, d.status, d.priceUsd, /Quoter 0x0+a4, not on Quoter /i.test(d.reason ?? ''), r.depthWeightedPriceUsd],
+      ['measured', 'not_measured', null, true, null]);
+    n = 0;
+    const same = Object.create(client) as BlazePhoenix;
+    same.usdValue = async (req) => { n++; return client.usdValue(req); };
+    const ok = await crossChainAverage({ client: same, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    eq('crossChainAverage: the same Quoter for both sizes keeps the depth measured', [n, ok.chains[0]!.depth!.status], [2, 'measured']);
+    // a client that names no Quoter: two absent Quoters are not the same Quoter — mutant Y6b
+    const unnamed = Object.create(client) as BlazePhoenix;
+    unnamed.usdValue = async (req) => { const { quoter: _q, ...v } = await client.usdValue(req); return v; };
+    const u = await crossChainAverage({ client: unnamed, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    eq('crossChainAverage: with no Quoter named the depth is not measured, and says why',
+      [u.chains[0]!.status, u.chains[0]!.depth!.status, u.chains[0]!.depth!.priceUsd, /Quoter unknown, not on Quoter unknown/.test(u.chains[0]!.depth!.reason ?? '')],
+      ['measured', 'not_measured', null, true]);
+  }
+  {
+    // mutant G2: the size check left to after the reads; G3: client and rpc both accepted; G12: maxSkew < 0 checked after the reads
+    const before = base.calls.length;
+    await throwsCode('crossChainAverage: depthAmountIn ≤ amountIn on one chain → bad_request before any chain is read',
+      () => crossChainAverage({ client, chains: [{ ...entries[0]!, depthAmountIn: A2 }, { ...entries[1]!, depthAmountIn: A1 }] }), 'bad_request');
+    await throwsCode('crossChainAverage: depthAmount ≤ amount (whole tokens) → bad_request',
+      () => crossChainAverage({ client, chains: [{ ...entries[0]!, depthAmountIn: A2 }, { chain: 'optimism', token: TKN, amount: '2', depthAmount: '2.0' }] }), 'bad_request');
+    await throwsCode('crossChainPrice: an entry with both client and rpc → bad_request',
+      () => crossChainPrice({ client, chains: [entries[0]!, { ...entries[1]!, client, rpc: op.provider }] }), 'bad_request');
+    await throwsCode('crossChainAverage: negative maxSkewSeconds → bad_request',
+      () => crossChainAverage({ client, maxSkewSeconds: -1, chains: [{ ...entries[0]!, depthAmountIn: A2 }] }), 'bad_request');
+    await throwsCode('crossChainPrice: both amountIn and amount → bad_request', () => crossChainPrice({ client, chains: [{ ...entries[0]!, amount: '1' }] }), 'bad_request');
+    await throwsCode('crossChainPrice: neither amountIn nor amount → bad_request', () => crossChainPrice({ client, chains: [{ chain: 'base', token: TKN }] }), 'bad_request');
+    eq('crossChain: those malformed requests read nothing', base.calls.length, before);
+  }
+  {
+    // mutant G8: a header without a timestamp still gives a measured price
+    const nots = mockProvider({ chainId: 8453, quoter: DEP[8453]!.quoter, decimalsFor: { [CHAINS[8453].usdc.toLowerCase()]: 6 }, timestampOf: () => null,
+      usd: (_a, _b, amt) => ({ netOut: (10n ** 12n * amt) / (10n ** 21n + amt) }) });
+    const c = new BlazePhoenix({ rpc: { base: nots.provider }, ...opts });
+    const r = await crossChainPrice({ client: c, chains: [entries[0]!] });
+    const x = r.chains[0]!;
+    eq('crossChainPrice: a header without a timestamp → that chain not_measured with its reason, never a price of unknown age',
+      [x.status, x.priceUsd, x.blockTimestamp, /no block timestamp/.test(x.reason ?? ''), r.status], ['not_measured', null, null, true, 'not_measured']);
+  }
+  {
+    // A1: whole-token amounts converted per chain with that chain's decimals()
+    const TK = TKN.toLowerCase();
+    const sized = (chainId: number, dec: number | 'revert', curve: { x: bigint; y: bigint }, decimalsFor?: Record<string, number | 'revert'>) => mockProvider({
+      chainId, quoter: DEP[chainId as keyof typeof DEP]!.quoter, timestampOf: () => T0,
+      decimalsFor: decimalsFor ?? { [CHAINS[chainId as keyof typeof CHAINS].usdc.toLowerCase()]: 6, [TK]: dec },
+      usd: (a, _b, amt) => (a.toLowerCase() === TK ? { netOut: (curve.y * amt) / (curve.x + amt) } : { revert: NO_ROUTE }),
+    });
+    // the same curve in whole tokens: 1000 tokens / 1,000,000 USD, with 6 decimals on base and 18 on optimism
+    const b6 = sized(8453, 6, { x: 1000n * 10n ** 6n, y: 10n ** 12n }), o18 = sized(10, 18, { x: 1000n * 10n ** 18n, y: 10n ** 12n });
+    const c = new BlazePhoenix({ rpc: { base: b6.provider, optimism: o18.provider }, ...opts });
+    const r = await crossChainPrice({ client: c, chains: [{ chain: 'base', token: TKN, amount: '1' }, { chain: 'optimism', token: TKN, amount: '1' }] });
+    const want = ((10n ** 12n * 10n ** 6n) / (1000n * 10n ** 6n + 10n ** 6n)) * 10n ** 12n;
+    // mutant: the conversion ignores the chain's decimals (18 everywhere)
+    eq('crossChainPrice: amount "1" with 6 decimals and with 18 decimals → the same price, amountIn in each chain\'s base units',
+      r.chains.map((x) => [x.status, x.amount, x.amountIn, x.priceUsd]), [['measured', '1', 10n ** 6n, want], ['measured', '1', 10n ** 18n, want]]);
+    eq('crossChainPrice: the same price on both → spread 0', [r.minPriceUsd, r.maxPriceUsd, r.spreadBps], [want, want, 0n]);
+    const fr = await crossChainPrice({ client: c, chains: [{ chain: 'base', token: TKN, amount: '0.0000001' }] });
+    eq('crossChainPrice: more fraction digits than the token has → not_measured with its reason, nothing quoted',
+      [fr.chains[0]!.status, fr.chains[0]!.amountIn, /fraction digits/.test(fr.chains[0]!.reason ?? '')], ['not_measured', null, true]);
+    const bad = sized(8453, 'revert', { x: 1n, y: 1n });
+    const cb = new BlazePhoenix({ rpc: { base: bad.provider }, ...opts });
+    const dr = await crossChainPrice({ client: cb, chains: [{ chain: 'base', token: TKN, amount: '1' }] });
+    eq('crossChainPrice: decimals() fails with a whole-token amount → not_measured with its reason, never a guessed 18',
+      [dr.chains[0]!.status, dr.chains[0]!.priceUsd, /decimals\(\) not measured/.test(dr.chains[0]!.reason ?? '')], ['not_measured', null, true]);
+    // decimals() answers 6 to the conversion and 18 in the pinned block
+    let n = 0;
+    const flip = new Proxy({} as Record<string, number | 'revert'>, { get: (_t, k) => (k === TK ? (n++ === 0 ? 6 : 18) : k === CHAINS[8453].usdc.toLowerCase() ? 6 : undefined) });
+    const fl = sized(8453, 6, { x: 10n ** 9n, y: 10n ** 12n }, flip);
+    const cf = new BlazePhoenix({ rpc: { base: fl.provider }, ...opts });
+    const mr = await crossChainPrice({ client: cf, chains: [{ chain: 'base', token: TKN, amount: '1' }] });
+    // mutant: the decimals of the conversion not checked against the block's
+    eq('crossChainPrice: the conversion\'s decimals differ from the block\'s → not_measured, no price, no impact',
+      [mr.chains[0]!.status, mr.chains[0]!.priceUsd, mr.chains[0]!.impactBps, /decimals\(\) read 6 for the conversion and 18/.test(mr.chains[0]!.reason ?? '')], ['not_measured', null, null, true]);
+  }
+  {
+    // A2: impact and derivation from the Quoter's route, read in the same previewPlan answer
+    const USDC = CHAINS[8453].usdc, WETH = CHAINS[8453].weth;
+    const P = (i: number) => getAddress(`0x${(0xb00 + i).toString(16).padStart(40, '0')}`);
+    const hop = (tIn: Address, tOut: Address, amt: bigint, out: bigint, kinds: number[], at = 0): Hop => ({
+      tokenIn: tIn, tokenOut: tOut, amountIn: amt, expectedOut: out,
+      legs: kinds.map((kind, i) => ({ pool: P(at + i), hooks: '0x0000000000000000000000000000000000000000', kind, fee: 500, tickSpacing: 10, zeroForOne: true, stable: false,
+        amountIn: amt / BigInt(kinds.length), expectedOut: out / BigInt(kinds.length), auxId: `0x${'0'.repeat(64)}` as Hex })),
+    });
+    const is = (a: Address, b: Address) => a.toLowerCase() === b.toLowerCase();
+    const routed = (kinds2: number[]) => mockProvider({
+      chainId: 8453, quoter: DEP[8453]!.quoter, timestampOf: () => T0, decimalsFor: { [USDC.toLowerCase()]: 6 },
+      usd: (a, b, amt) => {
+        if (!is(a, TKN) || !is(b, USDC)) return { revert: NO_ROUTE };
+        const w = amt / 1000n, out = (2n * 10n ** 6n * amt) / 10n ** 18n;
+        return { netOut: out, impactBps: 37n, hops: [hop(TKN, WETH, amt, w, [0, 1]), hop(WETH, USDC, w, out, kinds2, 2)] };
+      },
+    });
+    const one = async (prov: ReturnType<typeof mockProvider>, chain: Record<string, unknown> = { chain: 'base', token: TKN, amountIn: A1 }) =>
+      (await crossChainPrice({ client: new BlazePhoenix({ rpc: { base: prov.provider }, ...opts }), chains: [chain as never] })).chains[0]!;
+    const m = await one(routed([6]));
+    // mutant: impactBps left null / taken from another read; basis or source wrong
+    eq('crossChainPrice: impactBps = the Route.expectedImpactBps of the same previewPlan answer; every venue reads reserves or liquidity → measured',
+      [m.status, m.impactBps, m.impactBasis, m.impactSource, m.impactNote], ['measured', 37n, 'measured', 'quoter', undefined]);
+    {
+      // a client whose second size answers from another block: that size is not measured, its impact neither
+      // mutant I13: the depth quoted in another block keeps its impactBps, basis and source
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const drift = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); return q.blockNumber === undefined ? v : { ...v, blockNumber: v.blockNumber! + 1n }; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: drift, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!, dp = c.depth!;
+      eq('crossChainAverage: the second size quoted in another block → not_measured with its reason; no price, impact, basis or source',
+        [c.status, c.impactBps, dp.status, dp.priceUsd, dp.impactBps, dp.impactBasis, dp.impactSource, typeof dp.impactNote, /^quoted in block \d+ 0x[0-9a-f]{64}, not in block \d+ 0x[0-9a-f]{64}$/.test(dp.reason ?? ''), r.depthWeightedPriceUsd],
+        ['measured', 37n, 'not_measured', null, null, null, null, 'string', true, null]);
+    }
+    {
+      // the second size runs on the deployment the first resolved to, not on whatever "latest" is then
+      // mutant: the depth quote not pinned to the first quote's deployment (asked without version)
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const asked: (string | undefined)[] = [];
+      const spy = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { asked.push(q.version as string | undefined); return t.usdValue(q); }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: spy, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!;
+      eq('crossChainAverage: the second size is asked on the deployment the first quote ran on',
+        [asked.length, asked[0], typeof c.version, asked[1] === c.version, c.depth!.status], [2, undefined, 'string', true, 'measured']);
+    }
+    {
+      // a client whose second size answers from another deployment: that size is not measured
+      // mutant: the depth quote's deployment not checked against the first's
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const moved = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); return q.blockNumber === undefined ? v : { ...v, version: `${v.version}-other` }; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: moved, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const dp = r.chains[0]!.depth!;
+      eq('crossChainAverage: the second size quoted on another deployment → not_measured with its reason; no price, no depth-weighted price',
+        [dp.status, dp.priceUsd, dp.impactBps, /^quoted on deployment \S+-other, not on \S+$/.test(dp.reason ?? ''), r.depthWeightedPriceUsd], ['not_measured', null, null, true, null]);
+    }
+    {
+      // a reorg replaces the first quote's block between the two quotes: same height, another block
+      // mutant: the second size pinned by height only (it reads the new block and is measured)
+      const m = routed([6]);
+      const real = new BlazePhoenix({ rpc: { base: m.provider }, ...opts });
+      const reorged = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); if (q.blockNumber === undefined && q.blockHash === undefined) m.chain.reorg(v.blockNumber!); return v; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: reorged, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!, dp = c.depth!;
+      eq('crossChainAverage: the first quote\'s block replaced at the same height before the second → depth not_measured, no depth-weighted price',
+        [c.status, c.blockHash === m.chain.hashOf(c.blockNumber!), dp.status, dp.priceUsd, dp.impactBps, dp.reason?.includes(`no block ${c.blockHash} (a reorg replaced it`), r.depthWeightedPriceUsd],
+        ['measured', false, 'not_measured', null, null, true, null]);
+    }
+    {
+      // a client whose second size answers the same height under another hash
+      // mutant H1: the two quotes compared by height only
+      const real = new BlazePhoenix({ rpc: { base: routed([6]).provider }, ...opts });
+      const other = `0x${'ee'.repeat(32)}` as Hex;
+      const fork = new Proxy(real, { get: (t, k) => (k === 'usdValue'
+        ? async (q: Parameters<BlazePhoenix['usdValue']>[0]) => { const v = await t.usdValue(q); return q.blockHash === undefined ? v : { ...v, blockHash: other }; }
+        : Reflect.get(t, k)) });
+      const r = await crossChainAverage({ client: fork, chains: [{ chain: 'base', token: TKN, amountIn: A1, depthAmountIn: A2 }] });
+      const c = r.chains[0]!, dp = c.depth!;
+      eq('crossChainAverage: the second size at the same height under another block hash → not_measured with both hashes',
+        [c.status, dp.status, dp.priceUsd, dp.impactBps, dp.blockNumber === c.blockNumber, dp.reason === `quoted in block ${c.blockNumber} ${other}, not in block ${c.blockNumber} ${c.blockHash}`, r.depthWeightedPriceUsd],
+        ['measured', 'not_measured', null, null, true, true, null]);
+    }
+    const d = m.derivation!;
+    // mutant: hops, pools or bridge tokens dropped from the derivation
+    eq('crossChainPrice: the derivation carries the route: hops, bridge tokens, venues (address, kind, amountIn, out)',
+      [d.path, d.legs.length, d.legs[0]!.impactBps, d.legs[0]!.bridges, d.legs[0]!.hops.map((h) => [h.tokenIn, h.tokenOut, h.amountIn, h.out]),
+        d.legs[0]!.hops.map((h) => h.legs.map((g) => [g.pool, g.kind, g.amountIn, g.out]))],
+      ['TOKEN → USDC', 1, 37n, ['WETH'], [['TOKEN', 'WETH', A1, A1 / 1000n], ['WETH', 'USDC', A1 / 1000n, 2n * 10n ** 6n]],
+        [[[P(0), 0, A1 / 2n, A1 / 2000n], [P(1), 1, A1 / 2n, A1 / 2000n]], [[P(2), 6, A1 / 1000n, 2n * 10n ** 6n]]]]);
+    const v = await one(routed([6, 4]));
+    // mutant: a venue of a kind the Quoter does not read (V4) still labelled measured; or the modeled number dropped
+    eq('crossChainPrice: a venue whose kind the Quoter does not read → impactBasis modeled, the number kept, the note names the venue',
+      [v.impactBps, v.impactBasis, v.impactSource, /^modeled, not measured/.test(v.impactNote ?? ''), (v.impactNote ?? '').includes(`${P(3)} (kind 4)`), (v.impactNote ?? '').includes(P(2))],
+      [37n, 'modeled', 'quoter', true, true, false]);
+    // the direct quote fails: the price comes from TOKEN → WETH → USDC, and impactBps from its first leg (quoted at amountIn)
+    const two = mockProvider({
+      chainId: 8453, quoter: DEP[8453]!.quoter, timestampOf: () => T0, decimalsFor: { [USDC.toLowerCase()]: 6 },
+      usd: (a, b, amt) => is(a, TKN) && is(b, WETH) ? { netOut: amt / 1000n, impactBps: 30n, hops: [hop(TKN, WETH, amt, amt / 1000n, [5])] }
+        : is(a, WETH) && is(b, USDC) ? { netOut: (3000n * 10n ** 6n * amt) / 10n ** 18n, impactBps: 7n, hops: [hop(WETH, USDC, amt, (3000n * 10n ** 6n * amt) / 10n ** 18n, [8], 9)] }
+        : { revert: NO_ROUTE },
+    });
+    const t = await one(two);
+    // mutant: impactBps of the last leg (quoted at refX, not at amountIn)
+    eq('crossChainPrice: a two-leg via → impactBps and basis of its first leg; each leg keeps its own impactBps; scaledFrom shown',
+      [t.status, t.derivation!.path, t.impactBps, t.impactBasis, t.derivation!.legs.map((l) => l.impactBps), t.derivation!.scaledFrom],
+      ['measured', 'TOKEN → WETH → USDC', 30n, 'measured', [30n, 7n], 10n ** 18n]);
+    const nm = (await crossChainPrice({ client, chains: [entries[2]!] })).chains[0]!;
+    // mutant: a chain not measured reports an impact (0 or a stale one)
+    eq('crossChainPrice: a chain not measured → impactBps, basis and source null, with a note; never 0',
+      [nm.status, nm.impactBps, nm.impactBasis, nm.impactSource, typeof nm.impactNote], ['not_measured', null, null, null, 'string']);
+    const id = await one(routed([6]), { chain: 'base', token: 'USDC', amountIn: 10n ** 6n });
+    eq('crossChainPrice: the dollar token itself → price 1 USD, impactBps null (nothing is quoted)',
+      [id.status, id.priceUsd, id.impactBps, /dollar token/.test(id.impactNote ?? '')], ['measured', USD_E18, null, true]);
   }
 }
 

@@ -50,8 +50,16 @@ export {
 } from './erc20.js';
 export {
   usdFromVias, usdNotMeasured, MULTICALL3, USD_MAX_VIAS, USD_SNAPSHOT_TRIES,
-  type UsdValue, type UsdValueRequest, type UsdVia, type UsdLeg, type UsdSpread, type UsdReadings, type UsdViaReading, type UsdLegReading,
+  type UsdValue, type UsdValueRequest, type UsdVia, type UsdLeg, type UsdRouteHop, type UsdRouteLeg, type UsdSpread, type UsdReadings, type UsdViaReading, type UsdLegReading,
 } from './usd.js';
+export {
+  crossChainPrice, crossChainAverage, aggregateQuotedPrices, quotedUnitPriceUsd, formatQuotedUsd, wholeToBase, impactKindMeasured, USD_E18,
+  type QuotedDerivation, type QuotedDerivationLeg, type QuotedDerivationHop, type QuotedDerivationPool,
+  type CrossChainEntry, type CrossChainPriceRequest, type CrossChainPrice, type CrossChainAverageEntry,
+  type CrossChainAverageRequest, type CrossChainAverage, type QuotedChainPrice, type QuotedPricePoint,
+  type QuotedDepthPoint, type QuotedPriceAggregate, type QuotedPriceAggregateOptions, type QuotedIncludedChain,
+  type QuotedExcludedChain,
+} from './crossChain.js';
 export { toJSON, type Jsonify } from './json.js';
 export { resilientFetch, singleflight, type RetryOptions } from './resilience.js';
 export type {

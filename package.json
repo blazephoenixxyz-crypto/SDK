@@ -1,6 +1,6 @@
 {
   "name": "@blazephoenix/sdk",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "Official TypeScript SDK for BlazePhoenix — the on-chain DEX aggregator. Quote, build, verify and execute swaps 100% on YOUR RPC (no API in the read path, no key, no endpoints shipped). Versioned deployments (1.x live; 2.x pending: Router, Solver, Hub, Quoter, Gate). Base, Ethereum, Optimism, Arbitrum, Robinhood Chain.",
   "keywords": [
     "blazephoenix",
@@ -43,6 +43,11 @@
       "types": "./dist/xray/index.d.ts",
       "import": "./dist/xray/index.js",
       "require": "./dist/xray/index.cjs"
+    },
+    "./find": {
+      "types": "./dist/find/index.d.ts",
+      "import": "./dist/find/index.js",
+      "require": "./dist/find/index.cjs"
     }
   },
   "files": [
@@ -57,7 +62,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "tsx scripts/test.ts && tsx scripts/test-control-events.ts && tsx --test test/xray/*.test.ts",
+    "test": "tsx scripts/test.ts && tsx scripts/test-control-events.ts && tsx --test test/xray/*.test.ts test/find/*.test.ts",
     "test:subpath": "npm run build && node --test test/subpath/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build",
