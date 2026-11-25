@@ -54,6 +54,9 @@ export const WARNINGS = {
   coverage: (range: string) => `On-chain coverage is incomplete (blocks ${range}; see discovery.coverage): the first candidate is the most liquid of those found, a deeper one may exist outside what was scanned.`,
   noneFound: (range: string) => `none found in the covered range (blocks ${range}); not found is not "does not exist"`,
   belowFloor: (n: number) => `${n} more below 0.1% of the deepest (includeDust: true lists them)`,
+  /** n proposed addresses were not read (maxCandidates); notMeasured of them had no complete pre-filter measure. */
+  omitted: (n: number, notMeasured: number) => `${n} more proposed addresses were not read (maxCandidates; omittedAddresses lists them)`
+    + (notMeasured > 0 ? `, ${notMeasured} of them with no complete pre-filter measure (omittedNotMeasured): absent is not zero, read them before ruling them out` : ''),
 } as const;
 
 const BASIS = "Depth: usdValue (the BlazePhoenix Quoter's netOut in the dollar token, the minimum over its vias) at each order size, "
@@ -182,8 +185,13 @@ export interface FindTokenResult {
   discovery: FindDiscovery | null;
   candidates: Candidate[];
   sources: SourceStatus[];
-  /** Proposed addresses left out by maxCandidates. */
+  /** How many proposed addresses were left out by maxCandidates (not read). */
   omitted: number;
+  /** Those addresses, in queue order: each can be read with a narrower query or a higher maxCandidates. */
+  omittedAddresses: Address[];
+  /** The omitted addresses whose pre-filter measure is missing or partial (no bridge venue, a Uniswap V4
+   *  venue, an unread venue, or a centralized proposal): nothing measured says they are shallow. */
+  omittedNotMeasured: Address[];
   warnings: string[];
   basis: string;
 }
@@ -351,7 +359,7 @@ async function readCandidate(reader: FindReader, req: FindTokenRequest, chainId:
 
 const depthKey = (c: Candidate) => c.depth.upTo1pct?.usdOut ?? -1n;
 
-interface Proposed { address: Address; sources: SourceStatus['name'][]; proposedBy: string[]; agreement?: Candidate['agreement']; prefilterUsd?: bigint | null; prefilterPartial?: boolean }
+interface Proposed { address: Address; sources: SourceStatus['name'][]; proposedBy: string[]; agreement?: Candidate['agreement']; prefilterUsd?: bigint | null; prefilterPartial?: boolean; firstBlock?: number | null }
 
 const MODES = ['onchain', 'centralized', 'both'] as const;
 
@@ -441,6 +449,7 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
     const e = byAddr.get(lc(m.token))!;
     e.prefilterUsd = onchain!.measure.usd.get(lc(m.token)) ?? null;
     if (onchain!.measure.partial.has(lc(m.token))) e.prefilterPartial = true;
+    e.firstBlock = m.venues.length ? Math.min(...m.venues.map((v) => v.block)) : null;
   }
   for (const a of answers ?? []) for (const p of a.proposals) add(p.address, p.source, p.source);
   if (mode === 'both') for (const e of byAddr.values()) {
@@ -450,6 +459,8 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
   const includeDust = req.includeDust === true;
   const { queue, belowFloor } = floorAndQueue([...byAddr.values()], includeDust);
   const picked = queue.slice(0, max);
+  const left = queue.slice(max);
+  const notMeasured = left.filter((p) => typeof p.prefilterUsd !== 'bigint' || p.prefilterPartial === true);
   const candidates = await Promise.all(picked.map((p) => readCandidate(reader, req, chainId, p, sizes)));
   candidates.sort((x, y) => {
     const a = depthKey(x), b = depthKey(y);
@@ -470,6 +481,7 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
   if (mode !== 'onchain') warnings.push(WARNINGS.trust, WARNINGS.thirdParties);
   if (d && !d.complete) warnings.push(WARNINGS.coverage(covered(d)));
   if (belowFloor > 0 && !includeDust) warnings.push(WARNINGS.belowFloor(belowFloor));
+  if (left.length > 0) warnings.push(WARNINGS.omitted(left.length, notMeasured.length));
   if (mode === 'onchain' && d && candidates.length === 0) warnings.push(WARNINGS.noneFound(covered(d)));
   if (candidates.some((c) => c.liquidity.venues.some((v) => V4_KINDS.includes(v.kind)))) warnings.push(WARNINGS.v4);
   const discovery: FindDiscovery | null = d && onchain
@@ -478,6 +490,7 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
   return {
     query, chainId, mode, discovery, candidates,
     sources: [...(onchain ? [onchain.status] : []), ...(answers ?? []).map((a) => a.status)],
-    omitted: queue.length - picked.length, warnings, basis: BASIS,
+    omitted: left.length, omittedAddresses: left.map((p) => p.address), omittedNotMeasured: notMeasured.map((p) => p.address),
+    warnings, basis: BASIS,
   };
 }

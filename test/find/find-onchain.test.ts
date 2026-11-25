@@ -7,9 +7,10 @@ import assert from 'node:assert/strict';
 import { decodeFunctionData, decodeFunctionResult, encodeFunctionData, encodeFunctionResult, getAddress, parseAbi, type Address, type Hex } from 'viem';
 import { findToken, WARNINGS, type FindTokenRequest } from '../../src/find/index.js';
 import { MemoryStore, type IndexStore } from '../../src/find/onchain/store.js';
+import { floorAndQueue, measureMatches, type Queued } from '../../src/find/onchain/prefilter.js';
 import { MULTICALL3 } from '../../src/find/onchain/symbols.js';
 import type { UsdValue } from '../../src/usd.js';
-import { FakeChain, factoryLog, v2Log, word, type FakeChainOptions, type FakeLog, type FakeToken as ChainToken } from './fake-rpc.js';
+import { FakeChain, factoryLog, v2Log, v4Log, word, type FakeChainOptions, type FakeLog, type FakeToken as ChainToken } from './fake-rpc.js';
 import { dexPair, fakeFetch, fakeReader, USDC, WETH, type FakeToken } from './fake.js';
 
 const CHAIN = 8453;
@@ -47,7 +48,8 @@ class Erc20Chain extends FakeChain {
   }
 }
 
-interface Tok { n: number; symbol?: string; usdcBalance?: bigint; depthUsd: bigint; pairWith?: Address }
+/** noPair: no V2 pair (its venues come from `o.logs`); block: the V2 pair's creation block. */
+interface Tok { n: number; symbol?: string; usdcBalance?: bigint; depthUsd: bigint; pairWith?: Address; noPair?: boolean; block?: number }
 /** A Hub with one V2 factory F2 (counter = its pairs) and one pair per token, finalized at 900. */
 function world(toks: Tok[], o: Partial<FakeChainOptions> = {}) {
   const logs: FakeLog[] = [factoryLog(HUB, F2, 0, 5)];
@@ -57,17 +59,18 @@ function world(toks: Tok[], o: Partial<FakeChainOptions> = {}) {
   };
   const usdcBal: Record<string, bigint> = {};
   const readerToks: Record<string, FakeToken> = {};
+  let pairs = 0;
   toks.forEach((t, i) => {
     const other = t.pairWith ?? USDC;
     const [t0, t1] = lc(tk(t.n)) < lc(other) ? [tk(t.n), other] : [other, tk(t.n)];
-    logs.push(v2Log(F2, t0, t1, pair(t.n), 100 + i, 0, i + 1));
+    if (t.noPair !== true) logs.push(v2Log(F2, t0, t1, pair(t.n), t.block ?? 100 + i, 0, ++pairs));
     chainTokens[lc(tk(t.n))] = { symbol: { string: t.symbol ?? 'PEPE' }, name: { string: t.symbol ?? 'PEPE' } };
     if (t.pairWith === undefined && t.usdcBalance !== undefined) usdcBal[lc(pair(t.n))] = t.usdcBalance;
     readerToks[lc(tk(t.n))] = { symbol: t.symbol ?? 'PEPE', name: t.symbol ?? 'PEPE', decimals: 18, venue: { pairAddress: pair(t.n), kind: 0, pair: USDC, rt: t.depthUsd * E18, rp: t.depthUsd * E6, balT: t.depthUsd * E18, balP: t.depthUsd * E6 } };
   });
   if (!chainTokens[lc(addrX)]) chainTokens[lc(addrX)] = { symbol: { string: 'X' }, name: { string: 'X' } };
   const chain = new Erc20Chain(
-    { head: 1000, finalized: 900, hub: HUB, factoryCount: 1, counters: { [F2]: toks.length }, bridges: [], tokens: chainTokens, ...o, logs: [...logs, ...(o.logs ?? [])] },
+    { head: 1000, finalized: 900, hub: HUB, factoryCount: 1, counters: { [F2]: pairs }, bridges: [], tokens: chainTokens, ...o, logs: [...logs, ...(o.logs ?? [])] },
     { [lc(USDC)]: { decimals: 6, balances: usdcBal }, [lc(WETH)]: { decimals: 18, balances: {} } },
   );
   const inner = fakeReader(readerToks);
@@ -187,17 +190,19 @@ test('[range] includeDust lists the tokens below the floor, still counted, with 
   assert.ok(!r.warnings.some((x) => x.includes('below 0.1% of the deepest')));
 });
 
-// Mutant: a null measure counts as below the floor -> the unmeasured token is dropped.
-test('[vector] a token with no measure (no bridge venue) is kept, queued last: absent is not zero', async () => {
+// Mutant: a null measure counts as below the floor -> the unmeasured token is dropped. Mutant: M ++ U -> tk(3) cut.
+test('[vector] a token with no measure (no bridge venue) is kept, in its own lane: absent is not zero', async () => {
   const toks: Tok[] = [{ n: 1, usdcBalance: 1_000_000n, depthUsd: 100_000n }, { n: 2, usdcBalance: 900_000n, depthUsd: 90_000n }, { n: 3, pairWith: addrX, depthUsd: 1_000_000n }];
   const all = await find(world(toks));
   const x = all.candidates.find((c) => c.address === tk(3));
   assert.ok(x, 'unmeasured token kept');
   assert.equal(x!.prefilterUsd, null);
   assert.equal(all.discovery!.belowFloor, 0);
+  // Two lanes, measured first: the unmeasured token holds the second slot, the second measured one is cut and named.
   const cut = await find(world(toks), { maxCandidates: 2 });
-  assert.deepEqual(cut.candidates.map((c) => c.address).sort(), [tk(1), tk(2)].sort(), 'queued after the measured ones');
+  assert.deepEqual(cut.candidates.map((c) => c.address).sort(), [tk(1), tk(3)].sort(), 'interleaved with the measured ones');
   assert.equal(cut.omitted, 1);
+  assert.deepEqual(cut.omittedAddresses, [tk(2)]);
 });
 
 // Mutant: floorAndQueue ignores prefilterPartial (prefilter.ts `below`) -> the partly read token is dropped as dust.
@@ -264,4 +269,122 @@ test('[vector] an index that cannot run: source onchain ok:false with its error,
   assert.equal(r.candidates.length, 0);
   assert.equal(r.discovery, null);
   assert.equal(r.candidates.filter((c) => c.label).length, 0);
+});
+
+// ---- Tokens the pre-filter cannot measure (Uniswap V4 venues, pairs with no bridge token) ----
+// The measured and the not (fully) measured share the maxCandidates slots in two interleaved lanes,
+// measured first; the not-measured lane goes by the block of the token's first venue (older first:
+// nobody can create a venue in the past), then proposers, then address. Every address left out is
+// named in omittedAddresses, with a warning. A V4 venue's liquidity is not measured by this patch.
+const PM = getAddress('0x00000000000000000000000000000000000000a4');
+const REAL = 900;
+const poolId = (n: number): Hex => `0x${n.toString(16).padStart(64, '0')}`;
+const sorted = (a: Address, b: Address): [Address, Address] => (lc(a) < lc(b) ? [a, b] : [b, a]);
+/** A V4 venue of tk(n) against USDC, initialized in `block`. */
+const v4Of = (n: number, block: number) => v4Log(PM, poolId(0x4000 + n), ...sorted(tk(n), USDC), block);
+/** n impostors holding $1 of USDC each in a V2 pair (blocks 100+i), lower addresses than the real token. */
+const impostors = (n: number): Tok[] => Array.from({ length: n }, (_, i): Tok => ({ n: 100 + i, usdcBalance: 1n * E6, depthUsd: 10n }));
+type Shape = 'v4-only' | 'v2+v4' | 'non-bridge';
+/** The real token (deep, created at block 50) in one of the venue shapes the pre-filter cannot fully measure. */
+function realWorld(shape: Shape, flood: Tok[], extra: Tok[] = []) {
+  const real: Tok = shape === 'v4-only' ? { n: REAL, noPair: true, depthUsd: 1_000_000n }
+    : shape === 'v2+v4' ? { n: REAL, usdcBalance: 500_000n, depthUsd: 1_000_000n, block: 50 }
+      : { n: REAL, pairWith: addrX, depthUsd: 1_000_000n, block: 50 };
+  const logs = shape === 'non-bridge' ? [] : [v4Of(REAL, 50)];
+  return world([...flood, ...extra, real], { v4PoolManager: PM, logs });
+}
+const omittedWarning = (r: { warnings: string[] }) => r.warnings.filter((x) => x.includes('omittedAddresses'));
+
+// Mutant: floorAndQueue concatenates the lanes (M ++ U) -> the V4-only real token is cut from n = 10.
+test('[vector] V4-only real token behind 10 one-dollar impostors is read (it was cut: unmeasured queued last)', async () => {
+  const r = await find(realWorld('v4-only', impostors(10)));
+  assert.ok(r.candidates.some((c) => c.address === tk(REAL)), 'real token read');
+  assert.equal(r.candidates[0].address, tk(REAL), 'ranked first by depth');
+  assert.equal(r.omitted, 1);
+  assert.equal(r.omittedAddresses.length, 1);
+  assert.ok(lc(r.omittedAddresses[0]) !== lc(tk(REAL)));
+});
+
+// Mutant: omittedAddresses = [] -> the cut address is not named. Mutant: omittedNotMeasured = []. Mutant: drop the omitted warning.
+test('[vector] centralized flood: 10 low-address proposals and the real one, the cut one is named with a warning', async () => {
+  const w = world([...impostors(10), { n: REAL, usdcBalance: 1n, depthUsd: 1_000_000n }]);
+  const pairs = [...Array.from({ length: 10 }, (_, i) => dexPair(tk(100 + i), 'PEPE')), dexPair(tk(REAL), 'PEPE')];
+  const r = await findToken({ sources: 'centralized', query: 'PEPE', chainId: CHAIN, reader: w.reader, sizes: [10, 100], fetch: fakeFetch({ cg: { coins: [], details: {} }, dex: { pairs } }) });
+  assert.equal(r.candidates.length, 10);
+  assert.equal(r.omitted, 1);
+  assert.deepEqual(r.omittedAddresses, [tk(REAL)]);
+  assert.deepEqual(r.omittedNotMeasured, [tk(REAL)]);
+  assert.deepEqual(omittedWarning(r), [WARNINGS.omitted(1, 1)]);
+});
+
+// Matrix: impostors n = 0..15 x real token shape {V4-only, V2+V4, non-bridge only}.
+// Mutant: M ++ U -> red from n = 10 (V4-only, non-bridge). Mutant: measureMatches leaves V4 venues
+// unmarked -> V2+V4 red from n = 10 (measured lowest, last). Mutant: omittedAddresses = [] -> red at n >= 10.
+for (const shape of ['v4-only', 'v2+v4', 'non-bridge'] as const) for (let n = 0; n <= 15; n++) {
+  test(`[range] ${shape} real token, ${n} impostors: read, every cut address named and an impostor`, async () => {
+    const r = await find(realWorld(shape, impostors(n)));
+    assert.ok(r.candidates.some((c) => c.address === tk(REAL)), 'real token read');
+    assert.equal(r.omitted, Math.max(0, n + 1 - 10));
+    assert.equal(r.omittedAddresses.length, r.omitted);
+    assert.equal(new Set(r.omittedAddresses).size, r.omitted, 'no duplicate');
+    const imp = new Set(impostors(n).map((t) => tk(t.n)));
+    assert.ok(r.omittedAddresses.every((a) => imp.has(a)), 'only impostors are cut');
+    assert.deepEqual(r.omittedNotMeasured, []);
+    assert.equal(omittedWarning(r).length, r.omitted > 0 ? 1 : 0);
+    assert.equal(r.discovery!.belowFloor, 0);
+  });
+}
+
+// Mutant: measureMatches leaves a V4 venue unmarked, or the floor applies to a partial sum -> the real token falls below the floor.
+test('[vector] V2 dust + V4 venue beside a $1M measured token: a partial measure is not floored', async () => {
+  const deep: Tok = { n: 1, usdcBalance: 1_000_000n * E6, depthUsd: 10_000n };
+  const r = await find(realWorld('v2+v4', [], [deep]));
+  const real = r.candidates.find((c) => c.address === tk(REAL));
+  assert.ok(real, 'kept: its V4 venue is not measured');
+  assert.equal(real!.prefilterUsd, 500_000n, 'the measure is what the V2 pair holds');
+  assert.equal(r.discovery!.belowFloor, 0);
+  assert.equal(r.candidates[0].address, tk(REAL), 'ranked by depth');
+});
+
+// Mutant: the not-measured lane ordered by address (not first-venue block), or firstBlock not set -> newer low-address impostors win.
+test('[vector] not-measured lane by age: 15 newer V4-only impostors with lower addresses do not push out the older real token', async () => {
+  const flood: Tok[] = Array.from({ length: 15 }, (_, i): Tok => ({ n: 100 + i, noPair: true, depthUsd: 0n }));
+  const w = world([...flood, { n: REAL, noPair: true, depthUsd: 1_000_000n }], {
+    v4PoolManager: PM, logs: [v4Of(REAL, 50), ...flood.map((t, i) => v4Of(t.n, 100 + i))],
+  });
+  const r = await find(w);
+  assert.ok(r.candidates.some((c) => c.address === tk(REAL)), 'older first venue: read');
+  assert.equal(r.omitted, 6);
+  assert.deepEqual(r.omittedNotMeasured, r.omittedAddresses);
+  assert.deepEqual(r.omittedAddresses, flood.slice(9).map((t) => tk(t.n)), 'the newest are cut');
+});
+
+// Mutant: interleave starting with the not-measured lane -> the V4-only token takes the single slot.
+// Mutant: drop the omitted warning.
+test('[range] maxCandidates 1: the measured token is read, the not-measured one is named in omittedAddresses with a warning', async () => {
+  const r = await find(realWorld('v4-only', [{ n: 1, usdcBalance: 1_000n * E6, depthUsd: 10n }]), { maxCandidates: 1 });
+  assert.deepEqual(r.candidates.map((c) => c.address), [tk(1)]);
+  assert.deepEqual(r.omittedAddresses, [tk(REAL)]);
+  assert.deepEqual(r.omittedNotMeasured, [tk(REAL)]);
+  assert.deepEqual(omittedWarning(r), [WARNINGS.omitted(1, 1)]);
+});
+
+// Mutant: no dedup in the interleave -> the partial token appears twice. Mutant: M ++ U, or the not-measured lane by address -> order differs.
+test('[unit] floorAndQueue interleaves measured / not-measured, measured first, each address once', () => {
+  const q = (a: number, usd: bigint | null, firstBlock: number | null, partial = false): Queued => ({ address: tk(a), proposedBy: ['x'], prefilterUsd: usd, firstBlock, ...(partial ? { prefilterPartial: true } : {}) });
+  const items = [q(1, 3n, 1), q(2, 2n, 2), q(3, 1n, 20, true), q(4, null, 10), q(5, null, 5), q(6, null, null)];
+  const { queue, belowFloor } = floorAndQueue(items);
+  assert.deepEqual(queue.map((x) => x.address), [tk(1), tk(5), tk(2), tk(4), tk(3), tk(6)]);
+  assert.equal(belowFloor, 0);
+});
+
+// Mutant: measureMatches `continue`s past a V4 / non-address venue or a pair with no bridge token without marking it -> not partial.
+test('[unit] measureMatches: a V4 venue, a pair with no bridge token and a non-address venue make the token partial', async () => {
+  const v = (kind: number, venue: Hex, other: Address, t: Address) => ({ source: F2, kind, venue, tokens: sorted(t, other), block: 1 });
+  const m = (n: number, venue: ReturnType<typeof v>) => ({ token: tk(n), symbol: 'PEPE', name: 'PEPE', status: 'READ' as const, readAtBlock: 1, venues: [venue] });
+  const matches = [m(1, v(4, poolId(1), USDC, tk(1))), m(2, v(0, pair(2), addrX, tk(2))), m(3, v(0, poolId(3), USDC, tk(3)))];
+  const rpc = { request: async () => { throw new Error('no read expected'); } };
+  const out = await measureMatches(matches, { rpc: rpc as never, asOfBlock: 900, blockHash: poolId(900), bridges: [USDC, WETH], balanceKinds: [0, 1, 5, 6], usdValue: async () => { throw new Error('no price expected'); } });
+  assert.deepEqual([...out.partial].sort(), [tk(1), tk(2), tk(3)].map(lc).sort());
+  assert.deepEqual([...out.usd.values()], [null, null, null]);
 });

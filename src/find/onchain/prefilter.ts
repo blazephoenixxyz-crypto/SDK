@@ -2,8 +2,9 @@
 // a name can match thousands of tokens. Before the Quoter measures depth, each matched token is given
 // a cheap measure: the bridge-token balances its venues hold, valued at the bridge's usdValue, all
 // read in the index's block. A token far below the deepest one is left out (counted, never hidden);
-// a token with no measure is kept and queued last, one with an unread venue is not left out (absent is
-// not zero). The final order is still the Quoter's depth: this only decides which tokens are read.
+// a token with no measure, or with a venue not read or not measurable here (a Uniswap V4 venue, a pair
+// with no bridge token), is never left out (absent is not zero): it queues in its own lane, interleaved
+// with the measured ones. The final order is still the Quoter's depth: this only decides which tokens are read.
 import { getAddress, type Address, type Hex } from 'viem';
 import { CHAINS } from '../../constants.js';
 import type { UsdValue } from '../../usd.js';
@@ -40,7 +41,9 @@ export interface PrefilterReads {
 
 /** Per matched token (lower case): Σ over its venues paired with a bridge of balance·price/10^dec, in
  *  dollar-token base units; a venue whose balance, decimals or price was not read does not count;
- *  null when none counted. `partial`: the tokens with an unread venue (their sum is a lower bound). */
+ *  null when none counted. `partial`: the tokens with a venue that did not count, because it was not
+ *  read or cannot be measured here (a kind with no balance at the venue such as Uniswap V4, a venue
+ *  that is not an address, a pair with no bridge token): their sum is a lower bound. */
 export async function measureMatches(matches: readonly IndexMatch[], r: PrefilterReads): Promise<{ usd: Map<string, bigint | null>; partial: Set<string> }> {
   const out = new Map<string, bigint | null>(matches.map((m) => [lc(m.token), null]));
   const unread = new Set<string>();
@@ -48,9 +51,9 @@ export async function measureMatches(matches: readonly IndexMatch[], r: Prefilte
   const bridge = new Map(r.bridges.map((b) => [lc(b), b]));
   const pairs: { token: string; bridge: string; venue: Address }[] = [];
   for (const m of matches) for (const v of m.venues) {
-    if (!r.balanceKinds.includes(v.kind) || !/^0x[0-9a-fA-F]{40}$/.test(v.venue)) continue;
+    if (!r.balanceKinds.includes(v.kind) || !/^0x[0-9a-fA-F]{40}$/.test(v.venue)) { unread.add(lc(m.token)); continue; }
     const other = v.tokens.find((t) => lc(t) !== lc(m.token));
-    if (other === undefined || !bridge.has(lc(other))) continue;
+    if (other === undefined || !bridge.has(lc(other))) { unread.add(lc(m.token)); continue; }
     pairs.push({ token: lc(m.token), bridge: lc(other), venue: v.venue as Address });
   }
   if (pairs.length === 0 || r.asOfBlock === null || r.blockHash === null) return done();
@@ -78,22 +81,39 @@ export async function measureMatches(matches: readonly IndexMatch[], r: Prefilte
   return done();
 }
 
-/** prefilterPartial: the measure is a lower bound (a venue was not read), so the floor does not apply. */
-export interface Queued { address: Address; proposedBy: string[]; prefilterUsd?: bigint | null; prefilterPartial?: boolean }
+/** prefilterPartial: the measure is a lower bound (a venue did not count), so the floor does not apply.
+ *  firstBlock: the block of the token's first venue in the index (null: not known). */
+export interface Queued { address: Address; proposedBy: string[]; prefilterUsd?: bigint | null; prefilterPartial?: boolean; firstBlock?: number | null }
+
+const byProposersThenAddress = (x: Queued, y: Queued) =>
+  y.proposedBy.length - x.proposedBy.length || (lc(x.address) < lc(y.address) ? -1 : lc(x.address) > lc(y.address) ? 1 : 0);
 
 /** Drops what sits below 0.1 % of the deepest measure (unless includeDust), keeps the unmeasured and the
- *  partly measured, and
- *  queues by measure (unmeasured last), then number of proposers, then address. */
+ *  partly measured, and queues two lanes interleaved, the measured lane first, each address once:
+ *  the measured (by measure, then number of proposers, then address) and the not fully measured (no
+ *  measure, or a partial one) by the block of their first venue (older first, unknown last), then
+ *  proposers, then address. A partly measured token sits in both lanes and is queued at its first turn.
+ *  So tokens the pre-filter cannot measure keep about half the slots: a flood of cheap measured
+ *  impostors cannot push them all out, and one of them cannot pick a place by its address. */
 export function floorAndQueue<T extends Queued>(items: readonly T[], includeDust = false): { queue: T[]; belowFloor: number } {
   let deepest: bigint | null = null;
   for (const x of items) if (typeof x.prefilterUsd === 'bigint' && (deepest === null || x.prefilterUsd > deepest)) deepest = x.prefilterUsd;
   const below = (x: T) => deepest !== null && typeof x.prefilterUsd === 'bigint' && x.prefilterPartial !== true && !(x.prefilterUsd * PREFILTER_FLOOR_DIVISOR >= deepest);
   const belowFloor = items.filter(below).length;
   const kept = includeDust ? [...items] : items.filter((x) => !below(x));
-  kept.sort((x, y) => {
-    const a = typeof x.prefilterUsd === 'bigint' ? x.prefilterUsd : null, b = typeof y.prefilterUsd === 'bigint' ? y.prefilterUsd : null;
-    if (a !== b) { if (a === null) return 1; if (b === null) return -1; return b > a ? 1 : -1; }
-    return y.proposedBy.length - x.proposedBy.length || (lc(x.address) < lc(y.address) ? -1 : lc(x.address) > lc(y.address) ? 1 : 0);
+  const measured = kept.filter((x) => typeof x.prefilterUsd === 'bigint').sort((x, y) => {
+    const a = x.prefilterUsd as bigint, b = y.prefilterUsd as bigint;
+    return a !== b ? (b > a ? 1 : -1) : byProposersThenAddress(x, y);
   });
-  return { queue: kept, belowFloor };
+  const notMeasured = kept.filter((x) => typeof x.prefilterUsd !== 'bigint' || x.prefilterPartial === true).sort((x, y) => {
+    const a = x.firstBlock ?? null, b = y.firstBlock ?? null;
+    if (a !== b) { if (a === null) return 1; if (b === null) return -1; return a - b; }
+    return byProposersThenAddress(x, y);
+  });
+  const queue: T[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < Math.max(measured.length, notMeasured.length); i++) {
+    for (const x of [measured[i], notMeasured[i]]) if (x !== undefined && !seen.has(lc(x.address))) { seen.add(lc(x.address)); queue.push(x); }
+  }
+  return { queue, belowFloor };
 }

@@ -340,9 +340,13 @@ never picks one: the result has no `selected` or `best` field, and the choice st
   only says that a venue from an admitted factory pairs the token. Before the depth ladder, matches are ranked by what their
   venues hold in the bridge tokens (WETH, USDC) in the index's block; those under 0.1% of the
   deepest are counted in the warnings and left out (`includeDust: true` lists them, still within
-  `maxCandidates`: if `omitted` is above 0, raise `maxCandidates` to see the rest). That
-  measure, `prefilterUsd`, is a lower bound: venues paired with other tokens, venues whose
-  balances do not sit at their address, and unread balances add nothing.
+  `maxCandidates`). That measure, `prefilterUsd`, is a lower bound: venues paired with other
+  tokens, venues whose balances do not sit at their address (Uniswap V4), and unread balances add
+  nothing, and a token with such a venue is never left out by the floor. The measured tokens and
+  those with no or a partial measure share `maxCandidates` in two interleaved lanes, the measured
+  first; the second lane goes by the block of the token's first venue, older first. Addresses
+  left out by `maxCandidates` are listed in `omittedAddresses` (those with no complete measure
+  also in `omittedNotMeasured`) with a warning: read them, or raise `maxCandidates`.
   Everything shown about a candidate (code, symbol, name, decimals, depth, balances) is read on
   your RPC.
 - **Centralized search: opt-in only.** `sources: 'centralized'` asks the CoinGecko and
