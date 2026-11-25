@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.1 — findToken: tokens the pre-filter cannot measure are read
+
+- A token whose venues the pre-filter cannot measure (a Uniswap V4 venue, whose balances sit in
+  the shared PoolManager; a pair with no bridge token) was queued after every measured token, so
+  `maxCandidates` cheap measured impostors could keep it from being read. The measured tokens and
+  those with no or a partial measure now share the slots in two interleaved lanes, the measured
+  first; the second lane is ordered by the block of the token's first venue (older first), then
+  proposers, then address. A token with such a venue counts as partly measured: its
+  `prefilterUsd` is a lower bound and the 0.1% floor does not drop it.
+- `FindTokenResult.omittedAddresses` lists the addresses left out by `maxCandidates`, in queue
+  order, and `omittedNotMeasured` those of them with no complete pre-filter measure; a warning
+  names them whenever `omitted` is above 0.
+- The liquidity of a Uniswap V4 venue is still not measured.
+
 ## 1.8.0 — findToken (on-chain discovery)
 
 - `findToken({ query, chainId, rpc })` (`@blazephoenix/sdk/find`): candidates for a name or
