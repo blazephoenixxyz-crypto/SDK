@@ -80,6 +80,13 @@ const lower = (s: unknown) => (typeof s === 'string' ? s.toLowerCase() : '');
 const asAddress = (w: string): Address | null => (WORD.test(w) && /^0x0{24}/.test(w) ? (`0x${w.slice(26)}` as Address) : null);
 const wordOf = (data: string, i: number) => `0x${data.slice(2 + 64 * i, 2 + 64 * (i + 1))}`;
 
+/** Lowest of a list, in one pass: spreading a long list into Math.min overflows the argument limit. */
+export const lowest = (xs: readonly number[]): number | null => {
+  let lo: number | null = null;
+  for (const x of xs) if (lo === null || x < lo) lo = x;
+  return lo;
+};
+
 export const blockOf = (v: RawLog['blockNumber']): number | null => {
   if (v === null || v === undefined) return null;
   const n = typeof v === 'bigint' ? Number(v) : typeof v === 'number' ? v : /^0x[0-9a-f]+$/i.test(v) ? parseInt(v, 16) : NaN;

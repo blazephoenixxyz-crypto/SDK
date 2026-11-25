@@ -15,6 +15,7 @@ import { lookalike, skeleton, tokenText, visibleText, type LookalikeReport } fro
 import { runXray, type Transport as XrayTransport, type XrayReport } from '../xray/index.js';
 import { fromCoinGecko, fromDexscreener, type Proposal, type SourceStatus } from './sources.js';
 import { buildIndex, searchIndex, updateIndex, type Discovery, type IndexMatch, type IndexOptions } from './onchain/index.js';
+import { lowest } from './onchain/kinds.js';
 import { bridgesOf, floorAndQueue, measureMatches } from './onchain/prefilter.js';
 import { chainRpc } from './onchain/rpc.js';
 import { defaultStore, materialize, type IndexStore } from './onchain/store.js';
@@ -412,7 +413,7 @@ async function fromIndex(req: FindTokenRequest, chainId: number, query: string, 
 /** Blocks the index covered: the lowest source edge to its target block. */
 function covered(d: Discovery): string {
   const from = d.coverage.map((c) => c.fromBlock).filter((b): b is number => b !== null);
-  return from.length && d.asOfBlock !== null ? `${Math.min(...from)}..${d.asOfBlock}` : 'none';
+  return from.length && d.asOfBlock !== null ? `${lowest(from)}..${d.asOfBlock}` : 'none';
 }
 
 /** Find a token by name or ticker on one chain. Never selects one: see FindTokenResult.warnings. */
@@ -449,7 +450,7 @@ export async function findToken(req: FindTokenRequest): Promise<FindTokenResult>
     const e = byAddr.get(lc(m.token))!;
     e.prefilterUsd = onchain!.measure.usd.get(lc(m.token)) ?? null;
     if (onchain!.measure.partial.has(lc(m.token))) e.prefilterPartial = true;
-    e.firstBlock = m.venues.length ? Math.min(...m.venues.map((v) => v.block)) : null;
+    e.firstBlock = lowest(m.venues.map((v) => v.block));
   }
   for (const a of answers ?? []) for (const p of a.proposals) add(p.address, p.source, p.source);
   if (mode === 'both') for (const e of byAddr.values()) {
