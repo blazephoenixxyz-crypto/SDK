@@ -48,6 +48,10 @@
   (hidden characters, mixed scripts, Cyrillic, Greek and Armenian letters that look like ASCII,
   compatibility forms).
 - Optional X-Ray per candidate (`xray: { transport }`), off by default.
+- Fix: with `remoteVersions: true`, `crossChainAverage` measures the second size only on the Quoter
+  of the first. `usdValue` and each chain reading now name the `quoter` they used; a registry
+  refresh that moves the Quoter under the same version string leaves the depth `not_measured`,
+  with the reason, instead of mixing two deployments.
 
 ## 1.7.0 — quoted USD prices, on one chain and across chains
 

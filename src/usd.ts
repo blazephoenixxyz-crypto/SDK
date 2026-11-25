@@ -93,6 +93,9 @@ export interface UsdSpread { min: bigint; max: bigint; diff: bigint; bps: number
 export interface UsdValue {
   chainId: number;
   version: string;
+  /** The Quoter every previewPlan of this answer went to (set by BlazePhoenix.usdValue). With
+   *  remoteVersions a registry refresh can move it under the same version string. */
+  quoter?: Address;
   /** "USD (via USDC)", or "USD (via USDG)" on Robinhood Chain: the dollar token is taken as 1 USD. */
   label: string;
   dollarToken: Address;

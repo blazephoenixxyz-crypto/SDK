@@ -1903,6 +1903,35 @@ console.log('crossChain · crossChainPrice / crossChainAverage (RPC)');
     await throwsCode('crossChainAverage: depthAmountIn ≤ amountIn → bad_request', () => crossChainAverage({ client, chains: [{ ...entries[0]!, depthAmountIn: A1 }] }), 'bad_request');
   }
   {
+    // remoteVersions: a registry refresh between the two sizes may move the Quoter under the same
+    // version string; the second size must come from the Quoter of the first — mutant Y6
+    const q0 = (await client.usdValue({ chain: 'base', token: TKN, amountIn: A1 })).quoter;
+    eq('usdValue: quoter is the address every previewPlan went to', q0, DEP[8453]!.quoter);
+    let n = 0;
+    const moved = Object.create(client) as BlazePhoenix;
+    moved.usdValue = async (req) => {
+      const v = await client.usdValue(req);
+      return n++ === 0 ? v : { ...v, quoter: getAddress('0x00000000000000000000000000000000000000a4') };
+    };
+    const r = await crossChainAverage({ client: moved, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    const d = r.chains[0]!.depth!;
+    eq('crossChainAverage: a depth quote from another Quoter than the first is not measured, and says why',
+      [r.chains[0]!.status, d.status, d.priceUsd, /Quoter 0x0+a4, not on Quoter /i.test(d.reason ?? ''), r.depthWeightedPriceUsd],
+      ['measured', 'not_measured', null, true, null]);
+    n = 0;
+    const same = Object.create(client) as BlazePhoenix;
+    same.usdValue = async (req) => { n++; return client.usdValue(req); };
+    const ok = await crossChainAverage({ client: same, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    eq('crossChainAverage: the same Quoter for both sizes keeps the depth measured', [n, ok.chains[0]!.depth!.status], [2, 'measured']);
+    // a client that names no Quoter: two absent Quoters are not the same Quoter — mutant Y6b
+    const unnamed = Object.create(client) as BlazePhoenix;
+    unnamed.usdValue = async (req) => { const { quoter: _q, ...v } = await client.usdValue(req); return v; };
+    const u = await crossChainAverage({ client: unnamed, chains: [{ ...entries[0]!, depthAmountIn: A2 }] });
+    eq('crossChainAverage: with no Quoter named the depth is not measured, and says why',
+      [u.chains[0]!.status, u.chains[0]!.depth!.status, u.chains[0]!.depth!.priceUsd, /Quoter unknown, not on Quoter unknown/.test(u.chains[0]!.depth!.reason ?? '')],
+      ['measured', 'not_measured', null, true]);
+  }
+  {
     // mutant G2: the size check left to after the reads; G3: client and rpc both accepted; G12: maxSkew < 0 checked after the reads
     const before = base.calls.length;
     await throwsCode('crossChainAverage: depthAmountIn ≤ amountIn on one chain → bad_request before any chain is read',

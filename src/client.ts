@@ -538,13 +538,16 @@ export class BlazePhoenix {
         if (e instanceof SnapshotGone) continue;
         throw e;
       }
-      return usdFromVias({
-        chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, dollarDecimals: got.dollarDecimals,
-        token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, blockHash: at.blockHash, blockTimestamp: ts, vias: got.vias, rpcRequests: sent,
-      });
+      return {
+        ...usdFromVias({
+          chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, dollarDecimals: got.dollarDecimals,
+          token, amountIn, tokenDecimals: got.tokenDecimals, blockNumber: got.blockNumber, blockHash: at.blockHash, blockTimestamp: ts, vias: got.vias, rpcRequests: sent,
+        }),
+        quoter: ctx.dep.contracts.quoter,
+      };
     }
     // no block hash held through every aggregate: not measured, never a value
-    return usdNotMeasured({ chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, token, amountIn, rpcRequests: sent });
+    return { ...usdNotMeasured({ chainId: ctx.chainId, version: ctx.dep.version, dollarToken: dollar, token, amountIn, rpcRequests: sent }), quoter: ctx.dep.contracts.quoter };
   }
 
   /** Execution-grade re-quote (previewPlanExact): every concentrated leg is
