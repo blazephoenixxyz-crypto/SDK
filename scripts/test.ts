@@ -11,7 +11,7 @@ import {
 import { formatAbiItem } from 'viem/utils';
 import { BLAZE_ERRORS_ABI, ERC20_ABI, QUOTER_ABI, ROUTER_ABI, SOLVER_ABI } from '../src/abis.js';
 import {
-  CHAINS, EXECUTION_PROOF_TOPIC0, FEE_BPS, FEE_TOPIC0, SURPLUS_TOPIC0, SWAP_TOPIC0, resolveChain,
+  BASE_BUILDER_SUFFIX, CHAINS, EXECUTION_PROOF_TOPIC0, FEE_BPS, FEE_TOPIC0, SURPLUS_TOPIC0, SWAP_TOPIC0, resolveChain,
 } from '../src/constants.js';
 import { EMBEDDED_DEPLOYMENTS, featuresOf, matchesSelector } from '../src/deployments.js';
 import { Registry } from '../src/registry.js';
@@ -574,6 +574,24 @@ console.log('client · 1.x');
   eq('1.x buildSwap: minOut = netOut − 0.5% (default)', dd.userMinOut, minOutFor(plan.quote.amountOut, 50, plan.quote.preview.effectiveMinOut));
   eq('1.x buildSwap: recipient + deadline', [dd.recipient, dd.deadline], [ME, 2_000_000_000n]);
   check('1.x buildSwap: approval step (allowance 0)', plan.approval?.spender === V1.router && plan.approval.current === 0n && plan.steps.length === 2);
+
+  // Base Builder Code (ERC-8021): appended to the swap on Base, after the ABI payload, and only there.
+  // Mutants: suffix on every chain, suffix dropped, attribution default false, wrong bytes -> red.
+  const ascii = Array.from(new TextEncoder().encode('bc_rr7fua1b'), (b) => b.toString(16).padStart(2, '0')).join('');
+  eq('builder code: suffix = ERC-8021 schema 0 of bc_rr7fua1b', BASE_BUILDER_SUFFIX, `0x${ascii}0b00${'8021'.repeat(8)}`);
+  const { provider: offP } = mockProvider();
+  const off = await new BlazePhoenix({ rpc: { base: offP }, registry: { mode: 'embedded' }, cacheTtlMs: 0, attribution: false })
+    .buildSwap({ chain: 'base', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, from: ME, deadline: 2_000_000_000n });
+  check('builder code: Base swap = the plain swap + the suffix (default on)',
+    plan.tx.data === `${off.tx.data}${BASE_BUILDER_SUFFIX.slice(2)}` && !off.tx.data.endsWith(BASE_BUILDER_SUFFIX.slice(2)));
+  check('builder code: the approve step carries no suffix', !plan.approval!.tx.data.endsWith(BASE_BUILDER_SUFFIX.slice(2)));
+  {
+    const arbDep = EMBEDDED_DEPLOYMENTS.versions.find((v) => v.version === '1.0.0')!.chains[42161]!;
+    const { provider: arbP } = mockProvider({ chainId: 42161, quoter: arbDep.quoter, router: arbDep.router });
+    const arb = await new BlazePhoenix({ rpc: { arbitrum: arbP }, registry: { mode: 'embedded' }, cacheTtlMs: 0 })
+      .buildSwap({ chain: 42161, tokenIn: 'WETH', tokenOut: 'USDC', amountIn: 10n ** 18n, recipient: ME, deadline: 2_000_000_000n });
+    check('builder code: no suffix off Base', !arb.tx.data.endsWith(BASE_BUILDER_SUFFIX.slice(2)) && decodeSwapExactIn(arb.tx.data).deadline === 2_000_000_000n);
+  }
 
   const { provider: exactProvider } = mockProvider({ exactFor: () => 3_900_000_000n });
   const exactBlaze = new BlazePhoenix({ rpc: exactProvider, registry: { mode: 'embedded' } });

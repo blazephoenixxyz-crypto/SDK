@@ -150,3 +150,8 @@ export const CFG_TOPIC0 =
 /** 2.x routers: renounceControl (the Hub and the Gate emit the same topic). */
 export const CONTROL_RENOUNCED_TOPIC0 =
   '0x3b0cda0c58f80b51ae87c69183b6e19775f26af5c103b33a48d40caa709d4861' as const;
+
+/** ERC-8021 data suffix carrying the BlazePhoenix Base Builder Code (bc_rr7fua1b), appended to
+ *  swap calldata on Base so Base can attribute the volume. The Router's ABI decoder ignores
+ *  trailing calldata: the swap executes identically with or without it. */
+export const BASE_BUILDER_SUFFIX = '0x62635f72723766756131620b0080218021802180218021802180218021' as const;

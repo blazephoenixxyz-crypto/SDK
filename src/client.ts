@@ -26,7 +26,7 @@ import {
 } from './calldata.js';
 import { phoenixCheck, routeIsConsistent } from './checks.js';
 import {
-  CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
+  BASE_BUILDER_SUFFIX, CHAINS, FEE_BPS, NATIVE_TOKEN, resolveChain, type SupportedChainId,
 } from './constants.js';
 import { featuresOf, isZero, type VersionFeatures, type VersionSelector } from './deployments.js';
 import { BlazeError, decodeBlazeError, decodeRevertData, isTransportError, untrustedText } from './errors.js';
@@ -70,6 +70,9 @@ export interface ClientOptions extends TransportOptions {
   deadlineSec?: number;
   /** Max chunk for 2.x on-chain batchQuote (default 8; nodes cap eth_call gas). */
   batchChunk?: number;
+  /** Append the Base Builder Code (ERC-8021 data suffix) to swaps on Base (default true).
+   *  Attribution only: the Router ignores the trailing bytes. */
+  attribution?: boolean;
 }
 
 interface Ctx {
@@ -143,6 +146,7 @@ export class BlazePhoenix {
   private readonly cacheTtlMs: number;
   private readonly slippageBps: number;
   private readonly deadlineSec: number;
+  private readonly attribution: boolean;
   private readonly batchChunk: number;
   private readonly verified = new Map<string, Promise<void>>();
 
@@ -154,6 +158,7 @@ export class BlazePhoenix {
     this.cacheTtlMs = opts.cacheTtlMs ?? 1_000;
     this.slippageBps = opts.slippageBps ?? 50;
     this.deadlineSec = opts.deadlineSec ?? 120;
+    this.attribution = opts.attribution ?? true;
     this.batchChunk = Math.max(1, Math.min(32, opts.batchChunk ?? 8));
     minOutFor(0n, this.slippageBps, 0n); // validates the default early
     checkDeadlineSec(this.deadlineSec);
@@ -757,6 +762,7 @@ export class BlazePhoenix {
       }
     }
 
+    if (this.attribution && ctx.chainId === 8453) data = `${data}${BASE_BUILDER_SUFFIX.slice(2)}` as Hex;
     const tx: TxRequest = { chainId: ctx.chainId, to: router, data, value: tIn.native ? amountIn : 0n };
 
     let approval: ApprovalStep | null = null;
