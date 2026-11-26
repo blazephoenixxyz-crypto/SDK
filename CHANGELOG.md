@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Base Builder Code
+
+- `buildSwap` on Base appends the BlazePhoenix Base Builder Code to the swap calldata as an
+  ERC-8021 data suffix (`BASE_BUILDER_SUFFIX`), so Base can attribute the volume. The Router's
+  ABI decoder ignores trailing calldata: the swap settles identically with or without it
+  (eth_call on Base, block 62703300: same amountOut). Approvals and other chains are unchanged.
+- `new BlazePhoenix({ attribution: false })` turns it off.
+
 ## 1.8.1 — findToken: tokens the pre-filter cannot measure are read
 
 - A token whose venues the pre-filter cannot measure (a Uniswap V4 venue, whose balances sit in
